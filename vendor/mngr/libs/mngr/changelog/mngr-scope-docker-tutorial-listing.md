@@ -1,0 +1,3 @@
+Fixed `test_create_docker_default_image` in the docker release suite, which failed with exit 6 whenever the job running it held no Modal credentials.
+
+The test verified its agent had landed on the docker provider with `mngr list --include 'host.provider == "docker"'`. `--include` filters what discovery returned; it cannot stop discovery from happening. `mngr list` defaults to `--on-error abort` and discovers across every enabled provider, so an enabled-but-unreachable one aborts the whole listing before any agent is reported. It now scopes discovery with `--provider docker`, the pattern `test_create_commands.py` already documents for this exact check.

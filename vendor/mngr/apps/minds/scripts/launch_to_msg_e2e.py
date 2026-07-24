@@ -88,6 +88,7 @@ from loguru import logger
 # `--remote-debugging-port=<N>` so its Chromium DevTools endpoint is reachable,
 # then `chromium.connect_over_cdp()`. Same API for pages, locators, etc.
 from playwright.sync_api import BrowserContext
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Frame
 from playwright.sync_api import Page
 from playwright.sync_api import sync_playwright
@@ -932,13 +933,22 @@ def _create_workspace_and_first_message(
     done_redirect_url = ""
     opened_workspace = False
     while time.time() < deadline and not done:
-        stat = chrome.evaluate(
-            """async (id) => {
-                const r = await fetch('/api/v1/workspaces/operations/create/' + id);
-                return {status: r.status, body: await r.text()};
-            }""",
-            creation_id,
-        )
+        try:
+            stat = chrome.evaluate(
+                """async (id) => {
+                    const r = await fetch('/api/v1/workspaces/operations/create/' + id);
+                    return {status: r.status, body: await r.text()};
+                }""",
+                creation_id,
+            )
+        except PlaywrightError as exc:
+            # Opening the workspace moves the chrome view onto the /_chrome
+            # wrapper, destroying the execution context this poll runs in.
+            # The next pass reads the new document, or sees the workspace
+            # open and stops.
+            logger.info("[{}] status poll interrupted by a navigation: {}", label, str(exc).splitlines()[0])
+            _sleep(1)
+            continue
         payload = {}
         with contextlib.suppress(Exception):
             payload = json.loads(stat["body"])
@@ -1006,8 +1016,14 @@ def _create_workspace_and_first_message(
         raise E2EFailure(
             f"[{label}] creation DONE without redirect_url; check the /api/v1/workspaces/operations/create/<id> contract"
         )
-    logger.info("[{}] creation DONE; waiting for the app to open the workspace", label)
-    chat = wait_for_chat_window(ctx, label=label)
+    # Pin the wait to THIS workspace's agent host. The window has one content
+    # view, so creating W2 repoints the very page W1 is still showing -- an
+    # unpinned wait would match W1 mid-handoff and run W2's first-message check
+    # against W1's transcript, which already holds its own reply and so passes.
+    created_host_match = re.search(r"(agent-[a-f0-9]+)", done_redirect_url)
+    created_host = created_host_match.group(1) if created_host_match else None
+    logger.info("[{}] creation DONE; waiting for the app to open {}", label, created_host or "the workspace")
+    chat = wait_for_chat_window(ctx, label=label, host=created_host)
     chat_url = live_url(chat)
     logger.info("[{}] agent DONE; chat URL={}", label, chat_url)
     snap_page(chat, snaps.done)
