@@ -822,7 +822,11 @@ def open_workspace_via_tile(
     # covers the tiles entirely.
     dismiss_consent_if_present(chrome, timeout=3_000)
     tile = chrome.locator(f'text="{host_name}"').first
-    tile.wait_for(state="visible", timeout=10_000)
+    # ``attached`` for the same reason the both-tiles check uses it (the chrome
+    # view can be collapsed to the titlebar strip); ``click`` then does its own
+    # actionability wait and force-scrolls the tile into view.
+    tile.wait_for(state="attached", timeout=10_000)
+    tile.scroll_into_view_if_needed(timeout=10_000)
     tile.click()
     return wait_for_chat_window(ctx, label=label, timeout=60.0, host=host)
 
@@ -1646,7 +1650,14 @@ def run_e2e() -> int:
                 dismiss_consent_if_present(win, timeout=2_000)
                 try:
                     for tile_name in (HOST_NAME, HOST_NAME_2):
-                        win.locator(f'text="{tile_name}"').first.wait_for(state="visible", timeout=5_000)
+                        # ``attached``, not ``visible``: main.js collapses the chrome
+                        # view to the titlebar strip while a workspace is displayed,
+                        # so its home page can lay out with no usable bounding box
+                        # and Playwright calls every element invisible. What this
+                        # step verifies is that discovery listed both workspaces --
+                        # an exact-text element per host name, which the titlebar
+                        # breadcrumb cannot satisfy for both.
+                        win.locator(f'text="{tile_name}"').first.wait_for(state="attached", timeout=5_000)
                     break
                 except Exception as tiles_exc:
                     if time.time() >= tiles_deadline:
