@@ -1632,13 +1632,32 @@ def run_e2e() -> int:
             # the landing page; this catches that.
             logger.info("=== home page: verify both workspace tiles render ===")
             win.goto(origin + "/")
-            dismiss_consent_if_present(win, timeout=3_000)
             # Assert on the tiles themselves, not on body text: the titlebar
             # breadcrumb carries a workspace name, and HOST_NAME is a prefix of
             # HOST_NAME_2, so an innerText substring check passes on ANY page --
             # including the consent screen, which is what it silently did.
-            for tile_name in (HOST_NAME, HOST_NAME_2):
-                win.locator(f'text="{tile_name}"').first.wait_for(state="visible", timeout=30_000)
+            #
+            # Re-check consent each pass rather than once up front: it is served
+            # on whatever the page settles into, so a single dismissal racing the
+            # load can miss it and then spend the whole budget waiting for tiles
+            # the dialog is covering.
+            tiles_deadline = time.time() + 60
+            while True:
+                dismiss_consent_if_present(win, timeout=2_000)
+                try:
+                    for tile_name in (HOST_NAME, HOST_NAME_2):
+                        win.locator(f'text="{tile_name}"').first.wait_for(state="visible", timeout=5_000)
+                    break
+                except Exception as tiles_exc:
+                    if time.time() >= tiles_deadline:
+                        snap_page(win, "99-home-tiles-missing")
+                        body = ""
+                        with contextlib.suppress(Exception):
+                            body = win.evaluate("document.body.innerText")[:400]
+                        raise E2EFailure(
+                            f"home page never showed both tiles ({HOST_NAME!r}, {HOST_NAME_2!r}); "
+                            f"url={live_url(win)!r} body={body!r}"
+                        ) from tiles_exc
             snap_page(win, "17-home-both-tiles")
             logger.info("home page shows both tiles: {} and {}", HOST_NAME, HOST_NAME_2)
 
