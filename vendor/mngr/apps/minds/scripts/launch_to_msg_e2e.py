@@ -661,6 +661,24 @@ def _wait_cdp(port: int, timeout: float = 60.0) -> str:
     raise E2EFailure(f"CDP not reachable on :{port} after {timeout}s: {last_err}")
 
 
+def dismiss_consent_if_present(page: Page, *, timeout: float = 8_000) -> bool:
+    """Answer the "Help improve Minds" consent screen if it is up. True if dismissed.
+
+    Consent.jinja takes over the page while ``error_reporting_consent_given`` is
+    False, which it always is on a wiped ~/.minds. It is not once-per-run: it can
+    be back on a later ``goto("/")``, and a caller that assumed otherwise spent
+    the rest of the run driving a dialog it thought was the home page.
+    """
+    with contextlib.suppress(Exception):
+        consent_btn = page.wait_for_selector("#consent-continue", timeout=timeout)
+        if consent_btn is not None:
+            consent_btn.click()
+            page.wait_for_selector("#consent-continue", state="detached", timeout=15_000)
+            logger.info("dismissed error-reporting consent screen")
+            return True
+    return False
+
+
 def all_pages(ctx: BrowserContext) -> list[Page]:
     return list(ctx.pages)
 
@@ -800,6 +818,9 @@ def open_workspace_via_tile(
     ("e2e172219" vs "e2e172219-b") and a substring selector would take the
     wrong tile. Quoted ``text=`` is exact-string (case-insensitive).
     """
+    # The consent screen can be up on a freshly-navigated home page, and it
+    # covers the tiles entirely.
+    dismiss_consent_if_present(chrome, timeout=3_000)
     tile = chrome.locator(f'text="{host_name}"').first
     tile.wait_for(state="visible", timeout=10_000)
     tile.click()
@@ -1270,12 +1291,7 @@ def run_e2e() -> int:
         # the home page until answered. Dismiss it once via Continue; the
         # POST /consent + reload then proceeds home, so the create flow and the
         # later both-tiles home assertion see the home page, not the consent.
-        with contextlib.suppress(Exception):
-            consent_btn = win.wait_for_selector("#consent-continue", timeout=8_000)
-            if consent_btn is not None:
-                consent_btn.click()
-                win.wait_for_selector("#consent-continue", state="detached", timeout=15_000)
-                logger.info("dismissed error-reporting consent screen")
+        dismiss_consent_if_present(win)
 
         # 4-6. Create agent via UI click and drive to first message. Mirrors
         # what a user does (Configure panel, launch_mode field, host_name fill,
@@ -1616,11 +1632,13 @@ def run_e2e() -> int:
             # the landing page; this catches that.
             logger.info("=== home page: verify both workspace tiles render ===")
             win.goto(origin + "/")
-            win.wait_for_function(
-                f"document.body.innerText.includes({HOST_NAME!r}) && "
-                f"document.body.innerText.includes({HOST_NAME_2!r})",
-                timeout=30_000,
-            )
+            dismiss_consent_if_present(win, timeout=3_000)
+            # Assert on the tiles themselves, not on body text: the titlebar
+            # breadcrumb carries a workspace name, and HOST_NAME is a prefix of
+            # HOST_NAME_2, so an innerText substring check passes on ANY page --
+            # including the consent screen, which is what it silently did.
+            for tile_name in (HOST_NAME, HOST_NAME_2):
+                win.locator(f'text="{tile_name}"').first.wait_for(state="visible", timeout=30_000)
             snap_page(win, "17-home-both-tiles")
             logger.info("home page shows both tiles: {} and {}", HOST_NAME, HOST_NAME_2)
 
