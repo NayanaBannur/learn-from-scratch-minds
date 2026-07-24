@@ -96,6 +96,8 @@ from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
 
+from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
+
 
 class E2EFailure(Exception):
     """Raised for end-to-end drive failures specific to this script's domain.
@@ -546,14 +548,21 @@ def latchkey_shim() -> Path:
 
 
 def latchkey_env() -> dict[str, str]:
-    """Env the bundled latchkey shim needs: encryption key + Electron exec path."""
-    key_file = LATCHKEY_DIR / "encryption_key"
-    if not key_file.exists():
-        raise E2EFailure(f"latchkey encryption_key missing at {key_file}")
+    """Env the bundled latchkey shim needs: encryption key + Electron exec path.
+
+    ``<latchkey_directory>/encryption_key`` is created lazily -- nothing writes
+    it until something actually encrypts a credential, and a local workspace can
+    reach the slack flow without ever having done so. Seeding creds is that
+    first use, so ensure the key rather than requiring it to already exist;
+    demanding it turned "this run got far enough to need one" into a failure.
+    ``load_or_create_encryption_key`` owns the convention (and the
+    ``LATCHKEY_ENCRYPTION_KEY`` override), is idempotent, and publishes
+    atomically, so calling it here cannot race the app doing the same.
+    """
     return {
         **os.environ,
         "LATCHKEY_DIRECTORY": str(LATCHKEY_DIR),
-        "LATCHKEY_ENCRYPTION_KEY": key_file.read_text().strip(),
+        "LATCHKEY_ENCRYPTION_KEY": load_or_create_encryption_key(LATCHKEY_DIR).get_secret_value(),
         "MINDS_ELECTRON_EXEC_PATH": str(MINDS_APP_PATH),
     }
 
