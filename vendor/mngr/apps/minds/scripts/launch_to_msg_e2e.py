@@ -822,12 +822,16 @@ def open_workspace_via_tile(
     # covers the tiles entirely.
     dismiss_consent_if_present(chrome, timeout=3_000)
     tile = chrome.locator(f'text="{host_name}"').first
-    # ``attached`` for the same reason the both-tiles check uses it (the chrome
-    # view can be collapsed to the titlebar strip); ``click`` then does its own
-    # actionability wait and force-scrolls the tile into view.
+    # ``attached`` for the same reason the both-tiles check uses it: the chrome
+    # view can be collapsed to the titlebar strip while a workspace is displayed,
+    # leaving its page without a usable bounding box. That also rules out
+    # ordinary clicking -- Playwright's actionability wait (and
+    # scroll_into_view_if_needed) require geometry the collapsed view cannot
+    # provide. Dispatch the click event directly: what this step exercises is the
+    # tile's handler -- /goto/<agent_id>/ through the navigate-content bridge --
+    # not the pixel position it was clicked at.
     tile.wait_for(state="attached", timeout=10_000)
-    tile.scroll_into_view_if_needed(timeout=10_000)
-    tile.click()
+    tile.dispatch_event("click")
     return wait_for_chat_window(ctx, label=label, timeout=60.0, host=host)
 
 
