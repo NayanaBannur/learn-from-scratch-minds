@@ -63,7 +63,6 @@ from imbue.minds.desktop_client.destroying import read_destroying
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
-from imbue.minds.desktop_client.help_modal_requests import OpenHelpRequest
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
@@ -158,6 +157,8 @@ from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
@@ -359,29 +360,26 @@ def _suggested_create_color(backend_resolver: BackendResolverInterface) -> str:
 
 
 def _maybe_consent_screen() -> Response | None:
-    """Return the error-reporting consent screen if it still needs answering, else None.
+    """Return the error-reporting notice screen if it still needs acknowledging, else None.
 
     The screen is shown once per machine -- on first launch, and once more after upgrading from a
     build that predates it -- after the user has authenticated and before the landing content, until
-    they answer it via POST /consent. Callers are responsible for gating this on authentication. When
-    config is unavailable (e.g. minimal test apps) there is nothing to gate on, so this is a no-op.
+    the user acknowledges it via POST /consent. It is informational: during the alpha, unexpected
+    errors are always reported to Imbue and there is no opt-out. Callers are responsible for gating
+    this on authentication. When config is unavailable (e.g. minimal test apps) there is nothing to
+    gate on, so this is a no-op.
     """
     minds_config: MindsConfig | None = get_state().minds_config
     if minds_config is None or minds_config.get_error_reporting_consent_given():
         return None
-    return make_html_response(
-        content=render_consent_page(
-            report_unexpected_errors=minds_config.get_report_unexpected_errors(),
-            include_logs=minds_config.get_include_error_logs(),
-        )
-    )
+    return make_html_response(content=render_consent_page())
 
 
 def _handle_consent_page() -> Response:
-    """Render the error-reporting consent screen (GET /consent).
+    """Render the error-reporting notice screen (GET /consent).
 
-    The consent screen sits just after login, so an unauthenticated request is bounced to the login
-    page. If consent was already answered, redirect home so the screen never reappears.
+    The notice screen sits just after login, so an unauthenticated request is bounced to the login
+    page. If it was already acknowledged, redirect home so the screen never reappears.
     """
     if not _is_request_authenticated():
         return make_response(status_code=302, headers={"Location": "/login"})
@@ -392,45 +390,36 @@ def _handle_consent_page() -> Response:
 
 
 def _handle_consent_submit() -> Response:
-    """Record the consent-screen choices and mark consent as answered (POST /consent).
+    """Record that the user acknowledged the error-reporting notice (POST /consent).
 
-    The consent screen sits just after login, so this requires authentication. "Include logs" is only
-    persisted as on when reporting is also on, matching the screen's coupling.
+    The notice sits just after login, so this requires authentication. The screen is informational
+    (no opt-out during the alpha), so this only marks the notice as acknowledged -- reporting stays
+    on by default -- and it syncs the latchkey daemon's consent file for good measure.
     """
     if not _is_request_authenticated():
         return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
-    body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
-        return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
     minds_config: MindsConfig | None = get_state().minds_config
     if minds_config is not None:
-        report = bool(body.get("report_unexpected_errors", False))
-        include_logs = bool(body.get("include_logs", False))
-        minds_config.set_report_unexpected_errors(report)
-        minds_config.set_include_error_logs(include_logs and report)
         minds_config.set_error_reporting_consent_given(True)
         _sync_latchkey_forward_sentry_consent(minds_config)
     return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
 
 
 def _handle_error_reporting_settings() -> Response:
-    """Persist the error-reporting toggles from the Settings page (POST /_chrome/error-reporting).
+    """Persist the error-reporting opt-out from the Settings page (POST /_chrome/error-reporting).
 
-    Accepts any subset of ``{report_unexpected_errors, include_logs}``; each present boolean is saved.
-    The settings UI clears "include logs" when reporting is turned off, so the stored pair stays
-    consistent without extra coercion here.
+    A single ``report_unexpected_errors`` boolean gates both automatic error sends and their
+    log/traceback attachments. Saved live and mirrored to the latchkey daemon's consent file so the
+    change takes effect without an app restart.
     """
     if not _is_request_authenticated():
         return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
     body = request.get_json(silent=True, force=True)
-    if not isinstance(body, dict):
+    if not isinstance(body, dict) or "report_unexpected_errors" not in body:
         return make_response(status_code=400, content='{"error": "Invalid JSON body"}', media_type="application/json")
     minds_config: MindsConfig | None = get_state().minds_config
-    if minds_config:
-        if "report_unexpected_errors" in body:
-            minds_config.set_report_unexpected_errors(bool(body["report_unexpected_errors"]))
-        if "include_logs" in body:
-            minds_config.set_include_error_logs(bool(body["include_logs"]))
+    if minds_config is not None:
+        minds_config.set_report_unexpected_errors(bool(body["report_unexpected_errors"]))
         _sync_latchkey_forward_sentry_consent(minds_config)
     return make_response(status_code=200, content='{"ok": true}', media_type="application/json")
 
@@ -668,7 +657,6 @@ def _sync_latchkey_forward_sentry_consent(minds_config: MindsConfig) -> None:
     write_latchkey_forward_sentry_consent(
         latchkey_forward_sentry_consent_path(minds_config.data_dir),
         is_error_reporting_enabled=minds_config.get_report_unexpected_errors(),
-        is_log_inclusion_enabled=minds_config.get_include_error_logs(),
     )
 
 
@@ -681,8 +669,6 @@ def _handle_help_page() -> Response:
     ``/assist`` chat; the titlebar only sets it when the displayed workspace is healthy, so the
     agent-help option stays disabled on a loading/stuck workspace (whose chat couldn't be reached).
     """
-    minds_config: MindsConfig | None = get_state().minds_config
-    include_logs_setting = minds_config.get_include_error_logs() if minds_config else False
     workspace_agent_id = request.args.get("workspace", "")
     assist_available = request.args.get("assist") == "1"
     description = request.args.get("description", "")
@@ -700,7 +686,6 @@ def _handle_help_page() -> Response:
             workspace_name = ""
     return make_html_response(
         content=render_help_page(
-            include_logs_setting=include_logs_setting,
             workspace_agent_id=workspace_agent_id,
             assist_available=assist_available,
             description=description,
@@ -734,7 +719,6 @@ def _handle_help_report() -> Response:
         body=body,
         session_store=state.session_store,
         backend_resolver=state.backend_resolver,
-        minds_config=state.minds_config,
         paths=state.api_v1_paths,
     )
     return make_response(
@@ -1461,7 +1445,6 @@ def _handle_chrome_events() -> Response:
     """
     authenticated = _is_request_authenticated()
     backend_resolver = get_state().backend_resolver
-    help_broker = get_state().help_modal_request_broker
 
     def _event_generator() -> Iterator[str]:
         if not authenticated:
@@ -1479,11 +1462,11 @@ def _handle_chrome_events() -> Response:
         # in the main generator loop so each subscriber sees every event.
         health_queue: queue.Queue[tuple[str, AgentHealth]] = queue.Queue()
 
-        # Agent-initiated "open the pre-filled report modal" requests arrive on a
-        # Flask request thread (the /api/v1 report route) via the broker. We
-        # accumulate them per-connection and drain them in the loop, the same
-        # way health transitions are handled.
-        open_help_queue: queue.Queue[OpenHelpRequest] = queue.Queue()
+        # One-shot broadcast payloads (e.g. ``workspace_stopped``, ``open_help``)
+        # arrive on a Flask request thread via the broadcaster; we accumulate
+        # them per-connection and drain them in the loop, the same way health
+        # transitions are handled. Each payload is already the finished SSE frame.
+        broadcast_queue: queue.Queue[dict[str, str]] = queue.Queue()
 
         def _on_change() -> None:
             change_event.set()
@@ -1492,9 +1475,10 @@ def _handle_chrome_events() -> Response:
             _enqueue_health_change(health_queue, change_event, agent_id, status)
 
         # Subscribe this connection's queue + wake event directly (no callback)
-        # so the broker fans open-help requests onto it the same way health
+        # so the broadcaster fans one-shot payloads onto it the same way health
         # transitions reach ``health_queue``.
-        help_broker.subscribe(open_help_queue, change_event)
+        event_broadcaster = get_state().chrome_event_broadcaster
+        event_broadcaster.subscribe(broadcast_queue, change_event)
 
         if isinstance(backend_resolver, MngrCliBackendResolver):
             backend_resolver.add_on_change_callback(_on_change)
@@ -1625,17 +1609,8 @@ def _handle_chrome_events() -> Response:
                 if shutdown_event.is_set():
                     break
 
-                while not open_help_queue.empty():
-                    help_request = open_help_queue.get_nowait()
-                    yield "data: {}\n\n".format(
-                        json.dumps(
-                            {
-                                "type": "open_help",
-                                "description": help_request.description,
-                                "workspace_agent_id": help_request.workspace_agent_id,
-                            }
-                        )
-                    )
+                while not broadcast_queue.empty():
+                    yield "data: {}\n\n".format(json.dumps(broadcast_queue.get_nowait()))
 
                 while not health_queue.empty():
                     aid_str, status = health_queue.get_nowait()
@@ -1719,7 +1694,7 @@ def _handle_chrome_events() -> Response:
                         json.dumps({"type": "requests", **current_requests_payload, "auto_open": auto_open})
                     )
         finally:
-            help_broker.unsubscribe(open_help_queue, change_event)
+            event_broadcaster.unsubscribe(broadcast_queue, change_event)
             if isinstance(backend_resolver, MngrCliBackendResolver):
                 backend_resolver.remove_on_change_callback(_on_change)
             if tracker is not None:
@@ -2042,6 +2017,11 @@ def _handle_recovery_page(
     tracker: SystemInterfaceHealthTracker | None = get_state().system_interface_health_tracker
     initial_status = tracker.get_health(aid).value if tracker is not None else AgentHealth.HEALTHY.value
     initial_error = (tracker.get_last_restart_error(aid) or "") if tracker is not None else ""
+    # Whether an in-flight restart is start-only (a possible-no-op entry
+    # dispatch) vs a full manual bounce; None outside a restart. Selects the
+    # restarting-state copy on the page ("Loading workspace" vs "Restarting
+    # your workspace"). Read only while RESTARTING, so it never gates dispatch.
+    restart_is_start_only = tracker.get_restart_is_start_only(aid) if tracker is not None else None
     return_to = _sanitize_recovery_return_to(request.args.get("return_to", ""))
     is_explicit_restart = request.args.get("intent", "") == "restart"
     # The recovery page renders from ``render_status`` and then polls itself in
@@ -2053,8 +2033,9 @@ def _handle_recovery_page(
         if is_explicit_restart:
             # The user explicitly asked to restart a currently-healthy
             # workspace (the home-page restart control). Render as STUCK so
-            # the page runs the layer-2 probe and dispatches a restart instead
-            # of sitting idle on a "healthy" page.
+            # the page dispatches its start-only restart (a cold boot for a
+            # stopped mind, a no-op for a live one) instead of sitting idle
+            # on a "healthy" page.
             render_status = AgentHealth.STUCK.value
         elif return_to:
             # The workspace recovered before this page loaded -- either a race
@@ -2069,18 +2050,39 @@ def _handle_recovery_page(
             # restart button.
             pass
     backend_resolver: BackendResolverInterface = get_state().backend_resolver
+    # Display-only offline hint: whether the resolver currently reads the
+    # workspace's host as offline. Selects the "Bringing your workspace back
+    # online" copy for the restarting state (and rides along on every poll
+    # tick as a header, so a stale reading at a cold launch self-corrects once
+    # discovery lands). Never gates what is dispatched.
+    display_info = backend_resolver.get_agent_display_info(aid)
+    host_state: HostState | None = None
+    if display_info is not None:
+        try:
+            host_state = backend_resolver.get_host_state(HostId(display_info.host_id))
+        except ValueError:
+            # Resolvers without discovery report a "localhost" placeholder that
+            # is not a parseable HostId; they carry no host state anyway.
+            host_state = None
+    is_host_offline = host_state in (HostState.STOPPED, HostState.CRASHED)
     html_body = render_recovery_page(
         agent_id=aid,
         return_to=return_to,
         initial_status=render_status,
         initial_error=initial_error,
         ssh_command=_ssh_command_for_agent(backend_resolver, aid),
+        initial_offline=is_host_offline,
+        restart_is_start_only=bool(restart_is_start_only),
     )
     # Expose the rendered status so the page's background convergence poll can
     # tell "still restarting" (keep waiting, no reload) from a state change
     # (reload to render the new state) without a focus-stealing full reload on
-    # every tick. See the recovery script's ``scheduleRefresh``.
-    return make_html_response(content=html_body, headers={"X-Recovery-Status": render_status})
+    # every tick. See the recovery script's ``scheduleRefresh``, which also
+    # reads the offline hint off every tick.
+    return make_html_response(
+        content=html_body,
+        headers={"X-Recovery-Status": render_status, "X-Workspace-Offline": "1" if is_host_offline else "0"},
+    )
 
 
 # -- Account management routes --
@@ -2307,11 +2309,11 @@ def _build_app_settings_context() -> dict[str, Any]:
     Used by both the full settings page (browser-mode fallback) and the
     centered settings modal, which render the same shared sections: the
     permission overview (connectors / file sharing / workspace delegation
-    held across all active workspaces), the per-machine error-reporting
-    toggles, and the backup master-password section.
+    held across all active workspaces), the error-reporting opt-out, and the
+    backup master-password section.
     """
-    minds_config: MindsConfig | None = get_state().minds_config
     paths: WorkspacePaths | None = get_state().api_v1_paths
+    minds_config: MindsConfig | None = get_state().minds_config
 
     services_overview: list[object] = []
     file_sharing_grants: list[object] = []
@@ -2347,13 +2349,12 @@ def _build_app_settings_context() -> dict[str, Any]:
             permissions_unavailable = True
 
     return {
-        "report_unexpected_errors": minds_config.get_report_unexpected_errors() if minds_config else False,
-        "include_error_logs": minds_config.get_include_error_logs() if minds_config else False,
         "services_overview": services_overview,
         "file_sharing_grants": file_sharing_grants,
         "workspace_delegation_grants": workspace_delegation_grants,
         "permissions_unavailable": permissions_unavailable,
         "is_master_password_set": _is_any_account_password_set(paths),
+        "report_unexpected_errors": minds_config.get_report_unexpected_errors() if minds_config else True,
     }
 
 

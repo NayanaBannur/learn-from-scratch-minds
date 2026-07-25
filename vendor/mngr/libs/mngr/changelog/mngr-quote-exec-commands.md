@@ -1,3 +1,0 @@
-Fixed four `mngr exec` calls in the docker tutorial tests that passed their command as loose tokens instead of one quoted argument.
-
-`mngr exec` takes `[AGENTS]... COMMAND`, so the command must be a single argument -- the tutorial's own `test_exec` docstring says so ("note that the command must be quoted--it's the last argument passed to `mngr exec`"). Unquoted, the leading word is consumed as another agent name: `mngr exec my-task cat /etc/os-release` looks up agents `cat, my-task`, and `mngr exec my-task -- sh -c '...'` rejects `-c` as an agent name. `--` does not help, because with a single COMMAND argument there is nothing for it to separate.
