@@ -679,6 +679,20 @@ def dismiss_consent_if_present(page: Page, *, timeout: float = 8_000) -> bool:
     return False
 
 
+def click_in_chrome(chrome: Page, selector: str, *, timeout: float = 30_000) -> None:
+    """Click `selector` on the chrome view without depending on its geometry.
+
+    main.js collapses the chrome view to the titlebar strip while a workspace is
+    displayed, so its page can lay out with no usable bounding box. Playwright's
+    ordinary click then never satisfies its actionability wait -- the element is
+    present and correct, but has nothing to hit-test against. Dispatching the
+    event drives the same handler the user's click would.
+    """
+    target = chrome.locator(selector).first
+    target.wait_for(state="attached", timeout=timeout)
+    target.dispatch_event("click")
+
+
 def all_pages(ctx: BrowserContext) -> list[Page]:
     return list(ctx.pages)
 
@@ -821,17 +835,9 @@ def open_workspace_via_tile(
     # The consent screen can be up on a freshly-navigated home page, and it
     # covers the tiles entirely.
     dismiss_consent_if_present(chrome, timeout=3_000)
-    tile = chrome.locator(f'text="{host_name}"').first
-    # ``attached`` for the same reason the both-tiles check uses it: the chrome
-    # view can be collapsed to the titlebar strip while a workspace is displayed,
-    # leaving its page without a usable bounding box. That also rules out
-    # ordinary clicking -- Playwright's actionability wait (and
-    # scroll_into_view_if_needed) require geometry the collapsed view cannot
-    # provide. Dispatch the click event directly: what this step exercises is the
-    # tile's handler -- /goto/<agent_id>/ through the navigate-content bridge --
-    # not the pixel position it was clicked at.
-    tile.wait_for(state="attached", timeout=10_000)
-    tile.dispatch_event("click")
+    # What this step exercises is the tile's handler -- /goto/<agent_id>/ through
+    # the navigate-content bridge -- not the pixel it was clicked at.
+    click_in_chrome(chrome, f'text="{host_name}"', timeout=10_000)
     return wait_for_chat_window(ctx, label=label, timeout=60.0, host=host)
 
 
@@ -1756,7 +1762,7 @@ def run_e2e() -> int:
             # workspaces`` (a left-arrow glyph + the phrase), so an exact
             # text= match for the phrase alone won't find it. Match by
             # href= on the wrapping Link instead.
-            win.click('a[href="/"]:has-text("Back to workspaces")')
+            click_in_chrome(win, 'a[href="/"]:has-text("Back to workspaces")')
             win.wait_for_url(origin + "/", timeout=10_000)
             snap_page(win, "18a-back-to-workspaces-from-settings")
             win.goto(origin + f"/workspace/{w2_agent_id}/settings")
@@ -1765,10 +1771,10 @@ def run_e2e() -> int:
             # Iter 12 (Cancel modal): real users click Destroy by accident or
             # change their mind. Verify the Cancel button dismisses the modal
             # without firing any destroy call, leaving W2 alive.
-            win.click("#destroy-btn")
+            click_in_chrome(win, "#destroy-btn")
             win.wait_for_selector("#destroy-confirm-btn", state="visible", timeout=5_000)
             snap_page(win, "18b-w2-destroy-modal-opened")
-            win.click("#destroy-cancel-btn")
+            click_in_chrome(win, "#destroy-cancel-btn")
             win.wait_for_selector("#destroy-confirm-btn", state="hidden", timeout=5_000)
             snap_page(win, "18b2-w2-cancelled-modal-dismissed")
             # The settings page should still render the destroy button
@@ -1776,10 +1782,10 @@ def run_e2e() -> int:
             win.wait_for_selector("#destroy-btn", state="visible", timeout=5_000)
 
             # Now do the real destroy: reopen modal, click Confirm.
-            win.click("#destroy-btn")
+            click_in_chrome(win, "#destroy-btn")
             win.wait_for_selector("#destroy-confirm-btn", state="visible", timeout=5_000)
             snap_page(win, "18b3-w2-destroy-modal-reopened")
-            win.click("#destroy-confirm-btn")
+            click_in_chrome(win, "#destroy-confirm-btn")
             # The confirm handler POSTs /api/v1/workspaces/<id>/destroy then
             # redirects to /; wait for the navigation, then snap the in-flight state.
             win.wait_for_url(origin + "/", timeout=30_000)

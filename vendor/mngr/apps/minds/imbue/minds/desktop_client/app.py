@@ -30,7 +30,9 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.bootstrap import imbue_cloud_provider_name_for_account
+from imbue.minds.bootstrap import is_bring_your_own_cloud_enabled
 from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
+from imbue.minds.bootstrap import list_cloud_account_providers
 from imbue.minds.bootstrap import list_disabled_provider_names
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import WorkspacePaths
@@ -82,7 +84,6 @@ from imbue.minds.desktop_client.mind_liveness import get_shutdown_capable_worksp
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
-from imbue.minds.desktop_client.region_preference import AWS_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import VULTR_PROVIDER_KEY
@@ -137,6 +138,7 @@ from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sharing_modal_page
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
+from imbue.minds.desktop_client.templates import render_workspace_backup_history
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
@@ -1095,6 +1097,8 @@ def _handle_landing_page() -> Response:
         default_account_id=default_account_id or "",
         region_options_by_launch_mode=region_options,
         region_selected_by_launch_mode=region_selected,
+        cloud_accounts=list_cloud_account_providers(),
+        byok_clouds_enabled=is_bring_your_own_cloud_enabled(),
         # A deep-link that pre-fills a repo/branch wants those advanced fields
         # visible; otherwise start on the simple preset cards.
         start_advanced=bool(git_url or branch),
@@ -1150,7 +1154,6 @@ def _build_region_form_context(
     for launch_mode, provider_key in (
         (LaunchMode.IMBUE_CLOUD, IMBUE_CLOUD_PROVIDER_KEY),
         (LaunchMode.VULTR, VULTR_PROVIDER_KEY),
-        (LaunchMode.AWS, AWS_PROVIDER_KEY),
     ):
         options_by_launch_mode[launch_mode.value] = list(known_regions_for_provider(provider_key))
         selected_by_launch_mode[launch_mode.value] = default_region_for_provider_with_config(
@@ -1183,6 +1186,8 @@ def _handle_create_page() -> Response:
         default_account_id=default_account_id or "",
         region_options_by_launch_mode=region_options,
         region_selected_by_launch_mode=region_selected,
+        cloud_accounts=list_cloud_account_providers(),
+        byok_clouds_enabled=is_bring_your_own_cloud_enabled(),
         # A deep-link that pre-fills a repo/branch wants those advanced fields
         # visible; otherwise start on the simple preset cards.
         start_advanced=bool(git_url or branch),
@@ -1749,6 +1754,17 @@ def _build_providers_state_payload(backend_resolver: BackendResolverInterface) -
     disabled_names = list_disabled_provider_names()
     last_event_at, last_full_snapshot_at = backend_resolver.get_freshness_timestamps()
 
+    # Active (non-destroyed) workspace count per provider, for the panel's
+    # bring-your-own-key-account Delete buttons: an account in use renders its
+    # button disabled ("in use by N"). Render-time UX only -- the DELETE route's
+    # own active-workspace check (409) remains the authority.
+    workspace_count_by_provider: dict[str, int] = {}
+    for agent_id in backend_resolver.list_active_workspace_ids():
+        info = backend_resolver.get_agent_display_info(agent_id)
+        if info is not None and info.provider_name is not None:
+            provider_name_str = str(info.provider_name)
+            workspace_count_by_provider[provider_name_str] = workspace_count_by_provider.get(provider_name_str, 0) + 1
+
     # De-duplicate by name with priority disabled > error > ok. A provider can
     # appear in multiple source buckets during the window between a Disable click
     # (writes to minds' settings) and mngr observe's restart (rewrites the snapshot
@@ -1788,6 +1804,12 @@ def _build_providers_state_payload(backend_resolver: BackendResolverInterface) -
             "status": "disabled",
             "is_enabled": False,
         }
+    # Bring-your-own-key account annotations, applied across every source bucket
+    # (a byok provider can be healthy, errored, or disabled and still deletable).
+    for name, entry in entry_by_name.items():
+        if name.startswith("byok-"):
+            entry["is_cloud_account"] = True
+            entry["workspace_count"] = workspace_count_by_provider.get(name, 0)
     # Stable alphabetical order by name across all categories.
     entries = sorted(entry_by_name.values(), key=lambda entry: entry["name"])
     return {
@@ -2749,6 +2771,22 @@ def _handle_workspace_settings(
     return make_html_response(content=html)
 
 
+def _handle_workspace_backup_history(agent_id: str) -> Response:
+    """Render the client-filled backup-history page for one workspace."""
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    backend_resolver = get_state().backend_resolver
+    parsed_agent_id = AgentId(agent_id)
+    resolved_name = backend_resolver.get_workspace_name(parsed_agent_id)
+    if resolved_name:
+        display_name = resolved_name
+    else:
+        info = backend_resolver.get_agent_display_info(parsed_agent_id)
+        display_name = info.agent_name if info else agent_id
+    html = render_workspace_backup_history(agent_id=agent_id, ws_name=display_name)
+    return make_html_response(content=html)
+
+
 # -- Inbox routes --
 
 
@@ -3347,6 +3385,9 @@ def create_desktop_client(
     # Workspace settings page (the account-association and color writes it drives
     # now go through PATCH /api/v1/workspaces/<id>).
     app.add_url_rule("/workspace/<agent_id>/settings", view_func=_handle_workspace_settings)
+    # Full backup-history page, reached from the settings page's
+    # "View all N backups" footer.
+    app.add_url_rule("/workspace/<agent_id>/backups", view_func=_handle_workspace_backup_history)
 
     # Request inbox routes
     app.add_url_rule("/inbox", view_func=_handle_inbox_page)
