@@ -86,6 +86,36 @@ Sequence:
 
 Use this when the fast-forward path above doesn't apply. Each numbered step is also referenced by the fast path, so the step numbers are shared.
 
+### 0. Cut the apt snapshot mirror timestamp (before any T bump lands)
+
+Only needed when the release advances the DEFAULT_WORKSPACE_TEMPLATE
+`.mngr/apt-snapshot-timestamp` (the pinned Debian archive timestamp every
+workspace's apt sources resolve against). The mirror must serve the new
+timestamp BEFORE the bump commit lands anywhere an image could be built from,
+or fresh builds fail on missing indexes. Synchronously, via the connector's
+admin routes (the same `MINDS_ADMIN_KEY` auth as `admin paid`):
+
+```bash
+# Freeze the index set for the new timestamp (idempotent; minutes):
+curl -sf -X POST "$CONNECTOR_URL/apt-mirror/cut" \
+    -H "Authorization: Bearer $MINDS_ADMIN_KEY" -H 'Content-Type: application/json' \
+    -d '{"timestamp": "<YYYYMMDDTHHMMSSZ>"}'
+# Then warm the pool (each call fetches for a bounded time, then returns
+# a progress report); re-run until is_complete is true:
+curl -sf -X POST "$CONNECTOR_URL/apt-mirror/warm" \
+    -H "Authorization: Bearer $MINDS_ADMIN_KEY" -H 'Content-Type: application/json' \
+    -d '{"timestamp": "<YYYYMMDDTHHMMSSZ>"}'
+```
+
+Only after the cut succeeds, commit the new timestamp to
+`.mngr/apt-snapshot-timestamp` on the DEFAULT_WORKSPACE_TEMPLATE branch.
+Workspaces without a configured `APT_MIRROR_BASE_URL` fall back to
+snapshot.debian.org at the same timestamp (correct but throttled), so a
+not-yet-warmed mirror degrades to slow, never to wrong. Bring-up note: the
+very first cut on a fresh tier is this same call -- deploy the connector with
+the `apt-mirror` secrets (see `.minds/template/apt-mirror.sh`), cut, then pin
+sources.
+
 ### 1. Bump version + FALLBACK_BRANCH (mngr branch)
 
 For an iteration of the same version, skip. To bump: set `apps/minds/package.json` `version` (e.g. `0.3.1`) and `templates.py` `FALLBACK_BRANCH` to `"minds-v0.3.1"`. This bakes in a tag that doesn't exist until step 7 — fine, because step 4 overrides the DEFAULT_WORKSPACE_TEMPLATE ref via `template_ref`, so the tag is only hit in step 8.

@@ -251,6 +251,32 @@ root_packages = [
     "imbue.minds",
     "imbue.mngr_imbue_cloud",
 ]
+include_external_packages = true
+
+# The minds bootstrap layer must be importable before mngr: mngr reads
+# MNGR_HOST_DIR/MNGR_PREFIX and the profile settings.toml during its own
+# module-level initialization, so minds.bootstrap and minds.mngr_settings run
+# first (see imbue/minds/main.py) and must never pull mngr in themselves.
+[[tool.importlinter.contracts]]
+name = "minds bootstrap layer stays mngr-free and import-cheap"
+type = "forbidden"
+source_modules = ["imbue.minds.bootstrap"]
+forbidden_modules = [
+    "imbue.mngr",
+    "imbue.mngr_imbue_cloud",
+    "pydantic",
+    "click",
+]
+
+[[tool.importlinter.contracts]]
+name = "minds mngr_settings stays mngr-free"
+type = "forbidden"
+source_modules = ["imbue.minds.mngr_settings"]
+forbidden_modules = [
+    "imbue.mngr",
+    "imbue.mngr_imbue_cloud",
+    "click",
+]
 
 [[tool.importlinter.contracts]]
 name = "mngr layers contract"

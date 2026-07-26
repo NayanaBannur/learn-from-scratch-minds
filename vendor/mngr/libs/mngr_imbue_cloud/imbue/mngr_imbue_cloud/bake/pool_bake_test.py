@@ -115,9 +115,10 @@ def test_wait_for_deferred_install_polls_for_marker_or_finished_process() -> Non
     wait_for_deferred_install(runner, _baked(), host_name="slice-x", timeout_seconds=5)
     assert [label for label, _cmd in runner.calls] == ["deferred-install-wait"]
     command = runner.calls[0][1]
-    # The poll checks the success marker and uses a bracketed pgrep pattern (self-match guard).
-    assert "done.playwright" in command
-    assert "[d]eferred_install.sh" in command
+    # The poll checks the unit's satisfied condition (the Fortress engine binary)
+    # and uses a bracketed pgrep pattern (self-match guard).
+    assert "test -x /opt/fortress/tilion-fortress/tilion" in command
+    assert "[1]000-playwright-fortress" in command
     assert "timeout 5" in command
 
 

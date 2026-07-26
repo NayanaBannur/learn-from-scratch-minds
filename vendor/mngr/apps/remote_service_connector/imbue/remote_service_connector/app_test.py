@@ -4681,3 +4681,40 @@ def test_plans_migration_declares_all_quota_columns() -> None:
     assert "enforced_access" in migration_sql
     for column in app_mod.QUOTA_ENTITLEMENT_NAMES:
         assert migration_sql.count(column) >= 2, f"quota column {column!r} missing from a table"
+
+
+# -- Apt mirror route tests (service logic is covered in apt_mirror_test.py) --
+
+_APT_MIRROR_ENV_VARS = (
+    "APT_MIRROR_R2_ENDPOINT",
+    "APT_MIRROR_R2_BUCKET",
+    "APT_MIRROR_R2_ACCESS_KEY_ID",
+    "APT_MIRROR_R2_SECRET_ACCESS_KEY",
+)
+_APT_MIRROR_TIMESTAMP_BODY = {"timestamp": "20260725T000000Z"}
+
+
+def test_apt_mirror_routes_return_503_when_unconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """All four mirror routes answer 503 until the APT_MIRROR_* env configuration is present."""
+    for env_var in _APT_MIRROR_ENV_VARS:
+        monkeypatch.delenv(env_var, raising=False)
+    monkeypatch.setenv("MINDS_ADMIN_KEY", _ADMIN_KEY_TEST_VALUE)
+    client = TestClient(web_app)
+    assert client.get("/snap/20260725T000000Z/debian/dists/trixie/InRelease").status_code == 503
+    assert client.get("/snap/20260725T000000Z/debian/pool/main/f/foo/foo_1.0_amd64.deb").status_code == 503
+    cut = client.post("/apt-mirror/cut", headers=_admin_key_headers(), json=_APT_MIRROR_TIMESTAMP_BODY)
+    assert cut.status_code == 503
+    warm = client.post("/apt-mirror/warm", headers=_admin_key_headers(), json=_APT_MIRROR_TIMESTAMP_BODY)
+    assert warm.status_code == 503
+
+
+def test_apt_mirror_cut_and_warm_require_admin_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cut/warm authenticate before the config gate: bad or missing credentials are 401, not 503."""
+    monkeypatch.setenv("MINDS_ADMIN_KEY", _ADMIN_KEY_TEST_VALUE)
+    client = TestClient(web_app)
+    assert client.post("/apt-mirror/cut", json=_APT_MIRROR_TIMESTAMP_BODY).status_code == 401
+    assert client.post("/apt-mirror/warm", json=_APT_MIRROR_TIMESTAMP_BODY).status_code == 401
+    wrong_key_headers = {"Authorization": "Bearer wrong-key"}
+    assert (
+        client.post("/apt-mirror/cut", headers=wrong_key_headers, json=_APT_MIRROR_TIMESTAMP_BODY).status_code == 401
+    )

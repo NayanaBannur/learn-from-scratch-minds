@@ -447,7 +447,7 @@ def test_build_docker_run_command_passes_through_volume_mount_args(temp_mngr_ctx
 def test_build_volume_mount_args_legacy_shared_mode(temp_mngr_ctx: MngrContext) -> None:
     """Legacy mode emits `-v <vol>:/mngr-state:rw` regardless of host id."""
     provider = make_docker_provider(temp_mngr_ctx)
-    args = provider._build_volume_mount_args(HostId(HOST_ID_A), is_isolated=False)
+    args = provider._build_volume_mount_args(HostId(HOST_ID_A), is_isolated=False, volume_mount_path=None)
     assert args[0] == "-v"
     assert args[1].endswith(":/mngr-state:rw")
 
@@ -456,7 +456,7 @@ def test_build_volume_mount_args_isolated_mode(temp_mngr_ctx: MngrContext) -> No
     """Isolated mode emits `--mount type=volume,...,volume-subpath=volumes/vol-<hex>`."""
     provider = make_docker_provider(temp_mngr_ctx)
     host_id = HostId(HOST_ID_A)
-    args = provider._build_volume_mount_args(host_id, is_isolated=True)
+    args = provider._build_volume_mount_args(host_id, is_isolated=True, volume_mount_path=None)
     assert args[0] == "--mount"
     spec = args[1]
     assert spec.startswith("type=volume,")
@@ -465,6 +465,19 @@ def test_build_volume_mount_args_isolated_mode(temp_mngr_ctx: MngrContext) -> No
     assert f"volume-subpath=volumes/{expected_volume_id}" in spec
     # The state volume name appears as the source.
     assert f"source={provider._state_volume_name}" in spec
+
+
+def test_build_volume_mount_args_isolated_mode_with_custom_mount_path(temp_mngr_ctx: MngrContext) -> None:
+    """A custom volume_mount_path replaces host_dir as the isolated mount target."""
+    provider = make_docker_provider(temp_mngr_ctx)
+    host_id = HostId(HOST_ID_A)
+    args = provider._build_volume_mount_args(host_id, is_isolated=True, volume_mount_path="/home/user")
+    assert args[0] == "--mount"
+    spec = args[1]
+    assert "target=/home/user," in spec
+    assert f"target={provider.host_dir}" not in spec
+    expected_volume_id = provider._volume_id_for_host(host_id)
+    assert f"volume-subpath=volumes/{expected_volume_id}" in spec
 
 
 def test_build_volume_mount_args_disabled_returns_empty(temp_mngr_ctx: MngrContext) -> None:
@@ -476,7 +489,7 @@ def test_build_volume_mount_args_disabled_returns_empty(temp_mngr_ctx: MngrConte
         mngr_ctx=temp_mngr_ctx,
         config=config,
     )
-    assert provider._build_volume_mount_args(HostId(HOST_ID_A), is_isolated=False) == []
+    assert provider._build_volume_mount_args(HostId(HOST_ID_A), is_isolated=False, volume_mount_path=None) == []
 
 
 def test_host_volume_symlink_target_is_none_when_isolated(temp_mngr_ctx: MngrContext) -> None:

@@ -244,3 +244,15 @@ def test_list_persisted_agent_data_warns_and_reports_empty_when_listing_fails(tm
     store = DockerHostStore(volume=_FailingListdirVolume(root_path=tmp_path / "docker-store"))
     with allow_warnings(match="Persisted-agent listing"):
         assert store.list_persisted_agent_data_for_host(HostId(HOST_ID_A)) == []
+
+
+def test_container_config_volume_mount_path_defaults_to_none() -> None:
+    """Records written before the field existed deserialize to mount-at-host_dir behavior."""
+    config = ContainerConfig.model_validate({"start_args": []})
+    assert config.volume_mount_path is None
+
+
+def test_container_config_volume_mount_path_round_trips() -> None:
+    config = ContainerConfig(start_args=(), volume_mount_path="/home/user")
+    reloaded = ContainerConfig.model_validate_json(config.model_dump_json())
+    assert reloaded.volume_mount_path == "/home/user"

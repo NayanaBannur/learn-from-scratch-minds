@@ -98,6 +98,7 @@ from imbue.mngr.providers.ssh_host_setup import build_self_healing_host_entrypoi
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
 from imbue.mngr.providers.ssh_host_setup import build_start_sshd_command
 from imbue.mngr.providers.ssh_host_setup import parse_warnings_from_output
+from imbue.mngr.providers.ssh_host_setup import resolve_host_log_dir
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
@@ -459,12 +460,18 @@ class DockerProviderInstance(BaseProviderInstance):
         """Get the path to the known_hosts file for this provider instance."""
         return self._keys_dir / "known_hosts"
 
-    def _build_volume_mount_args(self, host_id: HostId, is_isolated: bool) -> list[str]:
+    def _build_volume_mount_args(
+        self,
+        host_id: HostId,
+        is_isolated: bool,
+        volume_mount_path: str | None,
+    ) -> list[str]:
         """Build the docker CLI args for the host's volume mount.
 
         Returns an empty list when host volumes are disabled. In isolated mode
         the per-host sub-folder of the shared state volume is bound directly at
-        host_dir via `--mount ... volume-subpath=...` (Docker Engine >= 25.0),
+        host_dir (or at ``volume_mount_path`` when set, with host_dir living
+        inside it) via `--mount ... volume-subpath=...` (Docker Engine >= 25.0),
         so the container cannot see sibling hosts' sub-folders. In shared mode
         the entire state volume is mounted at HOST_VOLUME_MOUNT_PATH and the
         caller is expected to symlink host_dir into it.
@@ -473,12 +480,20 @@ class DockerProviderInstance(BaseProviderInstance):
             return []
         if is_isolated:
             volume_id = self._volume_id_for_host(host_id)
+            mount_target = volume_mount_path if volume_mount_path is not None else str(self.host_dir)
             spec = (
                 f"type=volume,source={self._state_volume_name},"
-                f"target={self.host_dir},volume-subpath=volumes/{volume_id}"
+                f"target={mount_target},volume-subpath=volumes/{volume_id}"
             )
             return ["--mount", spec]
         return ["-v", f"{self._state_volume_name}:{HOST_VOLUME_MOUNT_PATH}:rw"]
+
+    def _configured_volume_mount_path_str(self) -> str | None:
+        return str(self.config.volume_mount_path) if self.config.volume_mount_path is not None else None
+
+    def _host_log_dir_str(self) -> str:
+        """Directory for plain-text service logs (shutdown, activity watcher) on hosts."""
+        return resolve_host_log_dir(str(self.host_dir), self.config.host_log_dir)
 
     def _get_host_volume_symlink_target(self, host_id: HostId, is_isolated: bool) -> str | None:
         """Get the path inside a container that host_dir should symlink to.
@@ -731,7 +746,9 @@ class DockerProviderInstance(BaseProviderInstance):
         self._create_shutdown_script(host)
 
         with log_span("Starting activity watcher in container"):
-            start_activity_watcher_cmd = build_start_activity_watcher_command(str(self.host_dir))
+            start_activity_watcher_cmd = build_start_activity_watcher_command(
+                str(self.host_dir), host_log_dir=self._host_log_dir_str()
+            )
             self._exec_in_container(container, start_activity_watcher_cmd)
 
         return host, ssh_host, ssh_port, host_public_key
@@ -741,13 +758,13 @@ class DockerProviderInstance(BaseProviderInstance):
 
         For Docker, the shutdown script kills PID 1 to stop the container.
         """
-        host_dir_str = str(host.host_dir)
+        log_dir_str = self._host_log_dir_str()
 
         script_content = f'''#!/bin/bash
 # Auto-generated shutdown script for mngr Docker host
 # Kills PID 1 to stop the container
 
-LOG_FILE="{host_dir_str}/logs/shutdown.log"
+LOG_FILE="{log_dir_str}/shutdown.log"
 mkdir -p "$(dirname "$LOG_FILE")"
 
 log() {{
@@ -1380,7 +1397,11 @@ kill -TERM 1
                     container_name=container_name,
                     labels=labels,
                     start_args=effective_start_args,
-                    volume_mount_args=self._build_volume_mount_args(host_id, is_isolated=is_isolated),
+                    volume_mount_args=self._build_volume_mount_args(
+                        host_id,
+                        is_isolated=is_isolated,
+                        volume_mount_path=self._configured_volume_mount_path_str(),
+                    ),
                 )
 
         except docker.errors.APIError as e:
@@ -1409,6 +1430,7 @@ kill -TERM 1
             start_args=effective_start_args,
             image=base_image,
             is_isolated_host_volume=is_isolated,
+            volume_mount_path=self._configured_volume_mount_path_str(),
         )
 
         lifecycle_options = lifecycle if lifecycle is not None else HostLifecycleOptions()
@@ -1661,7 +1683,11 @@ kill -TERM 1
                 container_name=container_name,
                 labels=labels,
                 start_args=effective_start_args,
-                volume_mount_args=self._build_volume_mount_args(host_id, is_isolated=config.is_isolated_host_volume),
+                volume_mount_args=self._build_volume_mount_args(
+                    host_id,
+                    is_isolated=config.is_isolated_host_volume,
+                    volume_mount_path=config.volume_mount_path,
+                ),
             )
         except (MngrError, docker.errors.DockerException) as e:
             raise MngrError(f"Failed to create container from snapshot: {e}") from e

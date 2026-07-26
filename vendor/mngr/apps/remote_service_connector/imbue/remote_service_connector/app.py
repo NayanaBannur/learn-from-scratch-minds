@@ -45,6 +45,7 @@ from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Request
 from fastapi.responses import HTMLResponse
+from fastapi.responses import Response
 from paramiko.hostkeys import HostKeyEntry
 from pydantic import BaseModel
 from pydantic import Field
@@ -96,6 +97,19 @@ from tenacity import retry
 from tenacity import retry_if_exception
 from tenacity import stop_after_attempt
 from tenacity import wait_exponential
+
+from imbue.remote_service_connector.apt_mirror import APT_MIRROR_MEDIA_TYPE
+from imbue.remote_service_connector.apt_mirror import APT_MIRROR_POOL_CACHE_CONTROL
+from imbue.remote_service_connector.apt_mirror import AptMirrorChecksumMismatchError
+from imbue.remote_service_connector.apt_mirror import AptMirrorCutRequest
+from imbue.remote_service_connector.apt_mirror import AptMirrorCutResult
+from imbue.remote_service_connector.apt_mirror import AptMirrorInvalidTimestampError
+from imbue.remote_service_connector.apt_mirror import AptMirrorNotCutError
+from imbue.remote_service_connector.apt_mirror import AptMirrorObjectNotFoundError
+from imbue.remote_service_connector.apt_mirror import AptMirrorUnsafePathError
+from imbue.remote_service_connector.apt_mirror import AptMirrorWarmRequest
+from imbue.remote_service_connector.apt_mirror import AptMirrorWarmResult
+from imbue.remote_service_connector.apt_mirror import get_apt_mirror_service_or_http_503
 
 logger = logging.getLogger(__name__)
 
@@ -3107,6 +3121,69 @@ def reconcile_slice_boxes(conn: Any, env_name: str) -> int:
 # ---------------------------------------------------------------------------
 
 web_app = FastAPI()
+
+
+# ---------------------------------------------------------------------------
+# Snapshot-pinned apt mirror (see apt_mirror.py for the service layer). The
+# serve routes are public (workspace apt clients hit them unauthenticated);
+# cut/warm are operator-only. All four answer 503 until the APT_MIRROR_* env
+# configuration is present, so tiers without the mirror are unaffected.
+
+
+@web_app.get("/snap/{timestamp}/{archive}/dists/{subpath:path}")
+def get_snap_dists_file(timestamp: str, archive: str, subpath: str) -> Response:
+    """Serve a frozen index file for a cut timestamp (public, unauthenticated)."""
+    service = get_apt_mirror_service_or_http_503()
+    try:
+        data = service.serve_dists_file(timestamp, archive, subpath)
+    except AptMirrorObjectNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except (AptMirrorUnsafePathError, AptMirrorInvalidTimestampError) as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return Response(content=data, media_type=APT_MIRROR_MEDIA_TYPE)
+
+
+@web_app.get("/snap/{timestamp}/{archive}/pool/{subpath:path}")
+def get_snap_pool_file(timestamp: str, archive: str, subpath: str) -> Response:
+    """Serve a pool file from the shared cache, reading through upstream on a miss (public)."""
+    service = get_apt_mirror_service_or_http_503()
+    try:
+        data = service.serve_pool_file(timestamp, archive, subpath)
+    except AptMirrorObjectNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except (AptMirrorUnsafePathError, AptMirrorInvalidTimestampError) as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return Response(
+        content=data,
+        media_type=APT_MIRROR_MEDIA_TYPE,
+        headers={"Cache-Control": APT_MIRROR_POOL_CACHE_CONTROL},
+    )
+
+
+@web_app.post("/apt-mirror/cut")
+def post_apt_mirror_cut(request: Request, body: AptMirrorCutRequest) -> AptMirrorCutResult:
+    """Freeze the index set for a new timestamp (admin; run before committing a T bump)."""
+    require_admin_key(request)
+    service = get_apt_mirror_service_or_http_503()
+    try:
+        return service.cut(body)
+    except (AptMirrorInvalidTimestampError, AptMirrorUnsafePathError) as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except (AptMirrorObjectNotFoundError, AptMirrorChecksumMismatchError) as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+
+@web_app.post("/apt-mirror/warm")
+def post_apt_mirror_warm(request: Request, body: AptMirrorWarmRequest) -> AptMirrorWarmResult:
+    """Pre-fetch a cut timestamp's pool files (admin; re-run until is_complete)."""
+    require_admin_key(request)
+    service = get_apt_mirror_service_or_http_503()
+    try:
+        return service.warm(body)
+    except (AptMirrorInvalidTimestampError, AptMirrorUnsafePathError) as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except AptMirrorNotCutError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
 
 
 # Public env var name the deployed connector reads at startup to expose
@@ -6512,8 +6589,19 @@ _MIN_CONTAINERS = int(os.environ.get("MINDS_CONNECTOR_MIN_CONTAINERS", "0"))
 # be > 0, so 0 is normalized to ``None`` at the call site below.
 _SCALEDOWN_WINDOW = int(os.environ.get("MINDS_CONNECTOR_SCALEDOWN_WINDOW", "0"))
 
+# boto3, imbue-common (frozen/mutable model bases), and loguru are import-time
+# dependencies of the apt_mirror module app.py imports above; the published
+# imbue-common matches the workspace version.
 image = modal.Image.debian_slim().pip_install(
-    "fastapi[standard]", "httpx", "supertokens-python", "psycopg2-binary", "paramiko", "tenacity"
+    "boto3",
+    "fastapi[standard]",
+    "httpx",
+    "imbue-common",
+    "loguru",
+    "paramiko",
+    "psycopg2-binary",
+    "supertokens-python",
+    "tenacity",
 )
 app = modal.App(name=f"rsc-{_DEPLOY_ENV}", image=image)
 

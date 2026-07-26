@@ -39,6 +39,13 @@ class ContainerConfig(HostConfig):
         default=False,
         description="Whether this host was created with isolated volume-subpath mounting",
     )
+    # Sticky per-host mount-target choice, same replay semantics as
+    # is_isolated_host_volume above. None (the default for records written
+    # before this field existed) means the volume mounts at host_dir.
+    volume_mount_path: str | None = Field(
+        default=None,
+        description="Container path where the per-host volume is mounted (None = at host_dir)",
+    )
 
 
 class HostRecord(FrozenModel):
