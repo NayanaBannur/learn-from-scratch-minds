@@ -1898,7 +1898,7 @@ class AgentCreator(MutableModel):
                         )
                         # Rsync the worktree's working directory over so that
                         # uncommitted changes (e.g. a locally-rsynced
-                        # vendor/mngr/) are included in the Docker build context.
+                        # system/vendor/mngr/) are included in the Docker build context.
                         _rsync_worktree_over_clone(
                             resolved_path,
                             clone_target,

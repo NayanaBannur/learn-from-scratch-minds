@@ -46,14 +46,14 @@ def test_finalize_tears_down_chat_agent_when_sentinel_present() -> None:
 
 
 def test_finalize_clears_baked_git_identity() -> None:
-    # The bake copies the operator's git identity into /mngr/code; finalize must
+    # The bake copies the operator's git identity into the workspace checkout; finalize must
     # unset it so adopting users' agents don't inherit the baker as their commit
     # author (the bootstrap re-supplies its neutral fallback on adoption).
     runner = _ScriptedRunner({})
     finalize_baked_pool_host(runner, _baked(), host_name="slice-x", sentinel_timeout_seconds=5)
     reset_cmd = next(cmd for label, cmd in runner.calls if label == "git-identity-reset")
-    assert "git -C /mngr/code config --local --unset user.name" in reset_cmd
-    assert "git -C /mngr/code config --local --unset user.email" in reset_cmd
+    assert "git -C /home/user/workspace config --local --unset user.name" in reset_cmd
+    assert "git -C /home/user/workspace config --local --unset user.email" in reset_cmd
     # It does not substitute any hardcoded identity value.
     assert "minds-bootstrap" not in reset_cmd
     # An already-absent key (git config --unset exit 5) is tolerated, not a failure.

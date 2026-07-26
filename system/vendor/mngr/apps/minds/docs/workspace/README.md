@@ -7,13 +7,13 @@ A "workspace" is a persistent mngr agent created from a template repository. The
 The template repository (e.g. [default-workspace-template](https://github.com/imbue-ai/default-workspace-template)) contains:
 
 - `.mngr/settings.toml` -- mngr configuration: agent types, create templates, environment variables
-- `supervisord.conf` -- background services, each a `[program:*]` section supervised by supervisord
-- `Dockerfile` -- container image definition
+- `system/supervisord.conf` -- background services, each a `[program:*]` section supervised by supervisord
+- `system/Dockerfile` -- container image definition
 - `CLAUDE.md` -- instructions for the Claude agent
-- `skills/` -- slash commands available to the agent
-- `scripts/` -- utility scripts (forward_port.py, run_ttyd.sh, etc.)
-- `libs/` -- Python packages for services (telegram_bot, bootstrap, cloudflare_tunnel, app_watcher)
-- `runtime/` -- gitignored runtime state (applications.toml, secrets, telegram history)
+- `.agents/skills/` -- skills available to the agent
+- `system/scripts/` -- utility scripts (forward_port.py, run_ttyd.sh, etc.)
+- `system/libs/` -- Python packages for the built-in services (bootstrap, cloudflare_tunnel, app_watcher, ...); user-built packages live in `creations/`
+- `data/` -- gitignored workspace data (uploads, memories, per-creation data, machine state, secrets)
 
 ## Key files
 
@@ -49,7 +49,7 @@ autostart=true
 autorestart=true
 ```
 
-### runtime/applications.toml
+### data/.state/applications.toml
 
 Tracks application ports for forwarding. Written by services via `scripts/forward_port.py`:
 
@@ -60,7 +60,7 @@ url = "http://localhost:8000"
 global = true
 ```
 
-### runtime/secrets
+### data/.secrets
 
 Contains environment variable exports injected by the desktop client:
 

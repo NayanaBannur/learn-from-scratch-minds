@@ -289,7 +289,7 @@ def test_check_script_accepts_installed_identity_at_or_above_the_minimum(tmp_pat
 def test_check_script_reports_env_sha_and_content(tmp_path: Path) -> None:
     repo = _make_workspace_repo(tmp_path)
     run_git_for_backup_test(repo, "tag", "minds-v1.0.0")
-    env_path = repo / "runtime" / "secrets" / "restic.env"
+    env_path = repo / "data" / ".secrets" / "restic.env"
     env_path.parent.mkdir(parents=True)
     env_path.write_text("RESTIC_REPOSITORY=s3:r\nRESTIC_PASSWORD=p\n")
     stub_bin = _make_stub_bin(tmp_path)
@@ -554,7 +554,7 @@ def _make_restore_workspace(tmp_path: Path) -> tuple[Path, Path, Path]:
     (backup_dir / "service.py").write_text("VERSION = 1\n")
     (code / "file.txt").write_text("version 1\n")
     restic_repo = (tmp_path / "restic-repo").resolve()
-    env_path = code / "runtime" / "secrets" / "restic.env"
+    env_path = code / "data" / ".secrets" / "restic.env"
     env_path.parent.mkdir(parents=True)
     env_path.write_text(f"RESTIC_REPOSITORY={restic_repo}\nRESTIC_PASSWORD={_RESTIC_TEST_PASSWORD}\n")
     run_git_for_backup_test(code, "add", "-A")
@@ -654,7 +654,7 @@ def test_restore_script_rewinds_host_dir_in_place_and_takes_a_safety_snapshot(tm
     # restic.env (the current env must survive the restore; the files must not).
     (code / "file.txt").write_text("version 2\n")
     (code / "extra.txt").write_text("added after the snapshot\n")
-    env_path = code / "runtime" / "secrets" / "restic.env"
+    env_path = code / "data" / ".secrets" / "restic.env"
     current_env = env_path.read_text() + "# current credentials marker\n"
     env_path.write_text(current_env)
 
@@ -715,7 +715,7 @@ def test_restore_script_restores_the_nested_host_dir_of_a_volume_level_snapshot(
     entry = _snapshot_entries(restic_repo)[0]
 
     (code / "file.txt").write_text("current content\n")
-    env_path = code / "runtime" / "secrets" / "restic.env"
+    env_path = code / "data" / ".secrets" / "restic.env"
     current_env = env_path.read_text()
 
     stub_bin = _stub_bin_with_restic(tmp_path)
@@ -862,13 +862,15 @@ def test_restore_script_skips_the_safety_snapshot_only_when_asked(tmp_path: Path
 @pytest.mark.timeout(120)
 def test_restore_script_honors_the_current_backup_toml_excludes(tmp_path: Path) -> None:
     # The safety snapshot must look like the user's hourly snapshots: when
-    # runtime/backup.toml customizes excludes, those excludes (not the
+    # data/system/backup.toml customizes excludes, those excludes (not the
     # defaults) shape the safety snapshot -- otherwise a user who excluded a
     # huge data dir would get a surprise multi-GB pre-restore backup.
     host, code, restic_repo = _make_restore_workspace(tmp_path)
     _restic_for_test(restic_repo, "backup", str(host))
     snapshot_id = _snapshot_entries(restic_repo)[0]["id"]
-    (code / "runtime" / "backup.toml").write_text('excludes = ["**/excluded-dir"]\n')
+    backup_toml = code / "data" / "system" / "backup.toml"
+    backup_toml.parent.mkdir(parents=True, exist_ok=True)
+    backup_toml.write_text('excludes = ["**/excluded-dir"]\n')
     excluded = code / "excluded-dir"
     excluded.mkdir()
     (excluded / "huge.txt").write_text("user excluded this from backups\n")

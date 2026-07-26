@@ -21,9 +21,9 @@ Each workspace runs its own system interface (the `system-interface` CLI, source
 Inside each agent's Docker container:
 - **Claude Code** runs as the main agent process in tmux window 0
 - The **bootstrap** (`uv run bootstrap`) runs first-boot setup and then execs `supervisord -n`, which supervises the background services declared as `[program:*]` sections in `supervisord.conf` (logs under `/var/log/supervisor`)
-- Services register their ports via `scripts/forward_port.py` into `runtime/applications.toml`
+- Services register their ports via `scripts/forward_port.py` into `data/.state/applications.toml`
 - An **app watcher** service monitors `applications.toml`, reconciles with the Cloudflare forwarding API, and writes service events to `events/services/events.jsonl`
-- A **cloudflared** service watches `runtime/secrets` for a tunnel token and manages the Cloudflare tunnel
+- A **cloudflared** service watches `data/.secrets` for a tunnel token and manages the Cloudflare tunnel
 - A **telegram bot** watches for incoming messages and forwards them to the agent via `mngr message`
 
 ## Creating agents
@@ -36,7 +36,7 @@ Agents can be created in two ways:
 
 ## Port forwarding
 
-Applications (services with ports) are tracked in `runtime/applications.toml`:
+Applications (services with ports) are tracked in `data/.state/applications.toml`:
 
 ```toml
 [[applications]]
@@ -56,7 +56,7 @@ The `global` flag indicates whether the agent wants Cloudflare forwarding enable
 The remote service connector URL comes from the per-tier `client.toml` loaded via `minds run --config-file <path>` (see `apps/minds/docs/environments.md`). `minds run` has no implicit default: if neither `--config-file` nor `MINDS_CLIENT_CONFIG_PATH` is set it refuses to start. The packaged Electron build passes `--config-file` explicitly from the bundled `client.toml`. Every tunnel request authenticates with the signed-in user's SuperTokens session -- no Basic-auth credentials or `OWNER_EMAIL` need to be configured on the client. Once signed in:
 
 1. A tunnel is created automatically after each agent is created
-2. The tunnel token is injected into the agent's `runtime/secrets`
+2. The tunnel token is injected into the agent's `data/.secrets`
 3. The cloudflared service inside the agent detects the token and starts the tunnel
 4. The app watcher registers services with the Cloudflare forwarding API
 5. Access is protected by Cloudflare Access with a default policy for the signed-in user's email

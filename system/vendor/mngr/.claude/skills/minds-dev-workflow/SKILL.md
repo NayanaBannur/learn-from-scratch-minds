@@ -1,11 +1,11 @@
 ---
 name: minds-dev-workflow
-description: End-to-end dev workflow for the minds app stack -- first-time bring-up, every-startup vendor/mngr sync, and the iteration loop against a running Docker agent. Use this when starting or restarting the dev Electron app, or after changing any minds component (mngr, the system interface, the default workspace template).
+description: End-to-end dev workflow for the minds app stack -- first-time bring-up, every-startup system/vendor/mngr sync, and the iteration loop against a running Docker agent. Use this when starting or restarting the dev Electron app, or after changing any minds component (mngr, the system interface, the default workspace template).
 ---
 
 # Minds Dev Workflow
 
-This skill covers the full minds dev cycle: standing up a DEFAULT_WORKSPACE_TEMPLATE worktree, syncing the live mngr code into that worktree's `vendor/mngr/`, activating a per-developer dev env, starting the dev Electron app, and iterating against a running Docker agent. Use it whenever you're about to start the dev app (the vendor/mngr sync needs to happen *every* startup) or after editing any component (mngr, the system_interface, the default workspace template).
+This skill covers the full minds dev cycle: standing up a DEFAULT_WORKSPACE_TEMPLATE worktree, syncing the live mngr code into that worktree's `system/vendor/mngr/`, activating a per-developer dev env, starting the dev Electron app, and iterating against a running Docker agent. Use it whenever you're about to start the dev app (the system/vendor/mngr sync needs to happen *every* startup) or after editing any component (mngr, the system_interface, the default workspace template).
 
 ## Architecture Overview
 
@@ -16,22 +16,22 @@ The minds stack has four components that need to stay in sync:
 3. **mngr core** (`libs/mngr/`) -- the agent management CLI
 4. **default-workspace-template** -- the template repo that defines the Docker container (Dockerfile, services.toml, skills, scripts)
 
-The template contains a `vendor/mngr/` directory (a snapshot of the mngr repo). During development, we sidestep that snapshot by rsyncing the local mngr working tree directly into a parallel-named branch of a DEFAULT_WORKSPACE_TEMPLATE worktree under `.external_worktrees/default-workspace-template/`.
+The template contains a `system/vendor/mngr/` directory (a snapshot of the mngr repo). During development, we sidestep that snapshot by rsyncing the local mngr working tree directly into a parallel-named branch of a DEFAULT_WORKSPACE_TEMPLATE worktree under `.external_worktrees/default-workspace-template/`.
 
 ### How changes propagate
 
 ```
-local mngr repo  -->  DEFAULT_WORKSPACE_TEMPLATE worktree's vendor/mngr/  -->  Docker container's /code/
+local mngr repo  -->  DEFAULT_WORKSPACE_TEMPLATE worktree's system/vendor/mngr/  -->  Docker container's /home/user/workspace/
                       (under .external_worktrees/)     (via rsync over SSH)
 ```
 
-The desktop client runs on the host (via Electron). The system interface + mngr run inside the container. The vendor/mngr/ sync is what makes the dev loop work end-to-end.
+The desktop client runs on the host (via Electron). The system interface + mngr run inside the container. The system/vendor/mngr/ sync is what makes the dev loop work end-to-end.
 
-### Critical: the vendor/mngr/ sync must happen BEFORE every Create
+### Critical: the system/vendor/mngr/ sync must happen BEFORE every Create
 
-When you click "Create" in the desktop client with a LOCAL-Docker provider, the desktop client (`apps/minds/.../agent_creator.py`) takes whatever's currently in the DEFAULT_WORKSPACE_TEMPLATE worktree (including `vendor/mngr/`), shallow-clones it to a temp dir, rsyncs the worktree's working dir over the clone (so uncommitted default-workspace-template-side changes propagate), and ships the result into `/code/` in the Docker container. mngr inside the container is `uv tool install -e`'d from `/code/vendor/mngr/`.
+When you click "Create" in the desktop client with a LOCAL-Docker provider, the desktop client (`apps/minds/.../agent_creator.py`) takes whatever's currently in the DEFAULT_WORKSPACE_TEMPLATE worktree (including `system/vendor/mngr/`), shallow-clones it to a temp dir, rsyncs the worktree's working dir over the clone (so uncommitted default-workspace-template-side changes propagate), and ships the result into `/home/user/workspace/` in the Docker container. mngr inside the container is `uv tool install -e`'d from `/home/user/workspace/system/vendor/mngr/`.
 
-**The desktop client does NOT auto-sync live mngr code into the worktree.** If `vendor/mngr/` is stale relative to your live mngr working tree, the Docker container's mngr will be stale too -- and (depending on what you've changed) `mngr create` inside the container may reject your `.mngr/settings.toml` with errors like `Unknown fields in agent_types.claude: [...]`. The bootstrap's chat-agent-create step then fails, and you'll see an empty workspace with "No conversation data" in the chat panel.
+**The desktop client does NOT auto-sync live mngr code into the worktree.** If `system/vendor/mngr/` is stale relative to your live mngr working tree, the Docker container's mngr will be stale too -- and (depending on what you've changed) `mngr create` inside the container may reject your `.mngr/settings.toml` with errors like `Unknown fields in agent_types.claude: [...]`. The bootstrap's chat-agent-create step then fails, and you'll see an empty workspace with "No conversation data" in the chat panel.
 
 `just minds-start` (the all-in-one recipe described below) does this sync for you on every invocation. Use it rather than running `pnpm start` directly when you're testing local mngr changes.
 
@@ -73,7 +73,7 @@ uv run minds env deploy
 
 # 4. (Every time you start the app, in a fresh shell) Activate the env
 #    and run `just minds-start`. The recipe re-syncs live mngr ->
-#    vendor/mngr/ and launches Electron.
+#    system/vendor/mngr/ and launches Electron.
 eval "$(uv run minds env activate dev-<your-user>)"
 just minds-start
 ```
@@ -86,7 +86,7 @@ If you want to run against prod / staging instead of a personal dev env, use `ev
 
 1. Verifies a minds env is activated in the shell (refuses with a helpful error if not).
 2. Verifies the DEFAULT_WORKSPACE_TEMPLATE worktree exists at `.external_worktrees/default-workspace-template/` and bails with a helpful error if not.
-3. Rsyncs the live mngr working tree into the DEFAULT_WORKSPACE_TEMPLATE worktree's `vendor/mngr/` using the same exclusions as the pool-bake's `--mngr-source` path (`.git`, `__pycache__`, `.venv`, `node_modules`, etc.). Uncommitted changes are included; nothing is committed in the DEFAULT_WORKSPACE_TEMPLATE worktree.
+3. Rsyncs the live mngr working tree into the DEFAULT_WORKSPACE_TEMPLATE worktree's `system/vendor/mngr/` using the same exclusions as the pool-bake's `--mngr-source` path (`.git`, `__pycache__`, `.venv`, `node_modules`, etc.). Uncommitted changes are included; nothing is committed in the DEFAULT_WORKSPACE_TEMPLATE worktree.
 4. Launches Electron with the right `MINDS_WORKSPACE_*` env vars so the create-form auto-fills "repository" and "branch". The workspace name is not prefilled -- the form generates a `mind-N` name unless you type one into its advanced "Name" field.
 
 ## Iterating on a running agent
@@ -103,9 +103,9 @@ apps/minds/scripts/propagate_changes \
 This:
 
 1. Verifies a minds env is activated in the shell (refuses without it).
-2. Rsyncs the mngr repo into the DEFAULT_WORKSPACE_TEMPLATE worktree's `vendor/mngr/` (same step `just minds-start` does, idempotent)
+2. Rsyncs the mngr repo into the DEFAULT_WORKSPACE_TEMPLATE worktree's `system/vendor/mngr/` (same step `just minds-start` does, idempotent)
 3. Stops the agent (`mngr stop`)
-4. Rsyncs the full template (with updated vendor/mngr/) into `/code/` in the container
+4. Rsyncs the full template (with updated system/vendor/mngr/) into `/home/user/workspace/` in the container
 5. Rebuilds the system interface frontend (`npm run build` via SSH)
 6. Starts the agent (`mngr start`)
 7. Stops and restarts the Electron desktop client (clean SIGTERM shutdown)
@@ -144,13 +144,13 @@ Do NOT use a key from `~/.mngr/profiles/...` -- that belongs to non-minds mngr a
 
 | Recipe | Purpose |
 |---|---|
-| `just minds-start` | **Preferred dev entry point.** Sync live mngr -> DEFAULT_WORKSPACE_TEMPLATE vendor/mngr, then launch the Electron app. Requires an activated minds env in the shell. |
+| `just minds-start` | **Preferred dev entry point.** Sync live mngr -> DEFAULT_WORKSPACE_TEMPLATE system/vendor/mngr, then launch the Electron app. Requires an activated minds env in the shell. |
 | `just minds-stop` | Kill the desktop client started in this worktree by `just minds-start`. |
 | `just minds-build` | Build the desktop client distributable via `todesktop` (slow, only for releases). |
 | `apps/minds/scripts/propagate_changes ...` | Sync changes into a running container without restarting the Electron app from scratch. See "Iterating on a running agent". Requires an activated env. |
-| `mngr imbue_cloud admin pool create --mngr-source <monorepo-root> ...` | Bake an OVH pool host (the imbue_cloud pool's VPS provider). `--mngr-source` rsyncs the monorepo into the DEFAULT_WORKSPACE_TEMPLATE vendor/mngr/ for the duration of the bake. (For pool hosts only -- has no effect on Docker mode.) Requires an activated env. Typically driven via the `minds pool create` wrapper, which injects OVH + pool-ssh credentials from Vault. |
+| `mngr imbue_cloud admin pool create --mngr-source <monorepo-root> ...` | Bake an OVH pool host (the imbue_cloud pool's VPS provider). `--mngr-source` rsyncs the monorepo into the DEFAULT_WORKSPACE_TEMPLATE system/vendor/mngr/ for the duration of the bake. (For pool hosts only -- has no effect on Docker mode.) Requires an activated env. Typically driven via the `minds pool create` wrapper, which injects OVH + pool-ssh credentials from Vault. |
 | `just deploy [--yes-i-mean-<tier>]` | Run `minds env deploy` on the activated env. For dev envs: provisions Modal env / Neon / SuperTokens + deploys both Modal apps + writes `~/.minds-<env>/{client.toml,secrets.toml}`. For tier deploys: pushes Vault secrets to Modal + deploys both Modal apps, no local state written. |
-| `just sync-vendor-mngr <default-workspace-template-path>` | One-shot: snapshot mngr HEAD into DEFAULT_WORKSPACE_TEMPLATE's vendor/mngr/ via `git archive` and commit in DEFAULT_WORKSPACE_TEMPLATE. Use for "release" syncs, not dev iteration (it commits and only carries committed mngr content). |
+| `just sync-vendor-mngr <default-workspace-template-path>` | One-shot: snapshot mngr HEAD into DEFAULT_WORKSPACE_TEMPLATE's system/vendor/mngr/ via `git archive` and commit in DEFAULT_WORKSPACE_TEMPLATE. Use for "release" syncs, not dev iteration (it commits and only carries committed mngr content). |
 
 ### Vault (for `minds env deploy` and pool / slice bakes)
 
@@ -191,13 +191,13 @@ If this chain breaks (orphaned `mngr observe`/`mngr event` processes appear), so
 
 ### Rsync exclusions
 
-`just minds-start`, `mngr imbue_cloud admin pool create --mngr-source ...`, and `propagate_changes` all rsync into `vendor/mngr/` using one shared form (`rsync -a --delete --filter=':- .gitignore' --exclude=.git --exclude=uv.lock`). The form, the rationale for each exclude, and the source-of-truth constants live in `apps/minds/docs/vendor-mngr-sync.md`.
+`just minds-start`, `mngr imbue_cloud admin pool create --mngr-source ...`, and `propagate_changes` all rsync into `system/vendor/mngr/` using one shared form (`rsync -a --delete --filter=':- .gitignore' --exclude=.git --exclude=uv.lock`). The form, the rationale for each exclude, and the source-of-truth constants live in `apps/minds/docs/vendor-mngr-sync.md`.
 
-`propagate_changes` additionally protects `runtime/`, `.mngr/`, and `.claude/settings.local.json` from deletion when rsyncing into `/code/`.
+`propagate_changes` additionally protects `data/`, `.mngr/`, and `.claude/settings.local.json` from deletion when rsyncing into `/home/user/workspace/`.
 
 ### Editable installs
 
-The DEFAULT_WORKSPACE_TEMPLATE Docker build installs mngr (`vendor/mngr/libs/mngr`) and the system_interface (`apps/system_interface/`) editable via `uv tool install -e`, run by `scripts/build_workspace.sh` (which the Dockerfile invokes with `RUN bash`), so Python code changes in either location are picked up immediately after rsync. Frontend changes require the `npm run build` step (done automatically by `propagate_changes`).
+The DEFAULT_WORKSPACE_TEMPLATE Docker build installs mngr (`system/vendor/mngr/libs/mngr`) and the system_interface (`apps/system_interface/`) editable via `uv tool install -e`, run by `scripts/build_workspace.sh` (which the Dockerfile invokes with `RUN bash`), so Python code changes in either location are picked up immediately after rsync. Frontend changes require the `npm run build` step (done automatically by `propagate_changes`).
 
 ### Template settings
 
@@ -234,13 +234,13 @@ cd "${DEFAULT_WORKSPACE_TEMPLATE_DIR:-$HOME/project/default-workspace-template}"
 git worktree add /path/to/mngr/worktree/.external_worktrees/default-workspace-template -b <branch-name> origin/main
 ```
 
-### Sync mngr code into the DEFAULT_WORKSPACE_TEMPLATE worktree's vendor/mngr/ by hand
+### Sync mngr code into the DEFAULT_WORKSPACE_TEMPLATE worktree's system/vendor/mngr/ by hand
 
 ```bash
 rsync -a --delete \
     --filter=':- .gitignore' \
     --exclude=.git --exclude=uv.lock \
-    ./ .external_worktrees/default-workspace-template/vendor/mngr/
+    ./ .external_worktrees/default-workspace-template/system/vendor/mngr/
 ```
 
 This is what `just minds-start` does internally, what `mngr imbue_cloud admin pool create --mngr-source ...` does for the duration of the bake, and what `propagate_changes` does as step 1 on each iteration.

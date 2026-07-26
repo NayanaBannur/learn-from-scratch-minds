@@ -1270,7 +1270,7 @@ def tear_down_unleased_slices(database_url: str, *, max_concurrency: int) -> Poo
 
 
 def _resolve_vendored_mngr_source(*, mngr_source: str | None, repo_root: Path, is_from_tag: bool) -> Path | None:
-    """Return the mngr tree to vendor into the DEFAULT_WORKSPACE_TEMPLATE clone's ``vendor/mngr``, or None to keep the clone's own.
+    """Return the mngr tree to vendor into the DEFAULT_WORKSPACE_TEMPLATE clone's ``system/vendor/mngr``, or None to keep the clone's own.
 
     An explicit ``--mngr-source`` always wins. Otherwise a ``--from-tag`` bake keeps
     the mngr already vendored at the pinned tag (returns None -- byte-for-byte tag
@@ -1385,7 +1385,7 @@ def allocate_slices(
             return
 
         # Resolve which mngr tree (if any) to vendor into the DEFAULT_WORKSPACE_TEMPLATE workspace's
-        # vendor/mngr (the baked container builds its mngr from there). For a
+        # system/vendor/mngr (the baked container builds its mngr from there). For a
         # --from-tag bake we keep the mngr already vendored at the pinned tag so the
         # slice is byte-for-byte tag content; only --workspace-dir (dev) or an
         # explicit --mngr-source overrides it. See _resolve_vendored_mngr_source.

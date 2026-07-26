@@ -530,7 +530,7 @@ def _container_backup_diagnostics(container_name: str) -> str:
     for label, command in (
         ("supervisor", "supervisorctl status host-backup"),
         ("events", "tail -c 3000 /mngr/*/events/backup/events.jsonl 2>/dev/null || echo no-events-file"),
-        ("env", "test -f /code/runtime/secrets/restic.env && echo env-present || echo env-missing"),
+        ("env", "test -f /code/data/.secrets/restic.env && echo env-present || echo env-missing"),
     ):
         result = subprocess.run(
             ["docker", "exec", container_name, "bash", "-lc", command],

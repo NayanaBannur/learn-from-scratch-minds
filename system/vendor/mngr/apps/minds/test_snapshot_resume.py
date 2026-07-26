@@ -87,7 +87,7 @@ from imbue.mngr.utils.testing import get_short_random_string
 _WORKSPACE_CONTAINER_PREFIX: Final[str] = "minds-"
 _DOCKER_STATE_MARKER: Final[str] = "docker-state"
 # system_interface's in-container port. It is a core bootstrap-managed
-# service with a fixed port (registered in runtime/applications.toml);
+# service with a fixed port (registered in data/.state/applications.toml);
 # kept as a constant so a drift shows up as a clear assertion failure.
 _SYSTEM_INTERFACE_PORT: Final[int] = 8000
 _MNGR_START_TIMEOUT_SECONDS: Final[int] = 300
@@ -372,7 +372,7 @@ def test_resumed_workspace_registered_expected_services(running_workspace: _Resu
     """After resume, the bootstrap re-registered the core services in applications.toml.
 
     The app-watcher / bootstrap respawns the standard services on restart and
-    each registers its port into ``runtime/applications.toml``; the always-on
+    each registers its port into ``data/.state/applications.toml``; the always-on
     core services (``system_interface`` and ``terminal``) must be present.
 
     ``web`` was intentionally dropped: default-workspace-template removed the
@@ -383,9 +383,9 @@ def test_resumed_workspace_registered_expected_services(running_workspace: _Resu
     assert the services guaranteed to survive a resume.
     """
     result = _exec_in_container(
-        running_workspace.container_name, "cat /home/user/workspace/runtime/applications.toml", timeout=30
+        running_workspace.container_name, "cat /home/user/workspace/data/.state/applications.toml", timeout=30
     )
-    assert result.returncode == 0, f"Could not read runtime/applications.toml: {result.stderr}"
+    assert result.returncode == 0, f"Could not read data/.state/applications.toml: {result.stderr}"
     for service_name in ("system_interface", "terminal"):
         assert service_name in result.stdout, (
             f"Service {service_name!r} not registered in applications.toml after resume:\n{result.stdout}"
@@ -872,7 +872,7 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
     Drives the actual provisioning entry points from the sandbox host: real
     `restic init` against local repositories (keyed by the per-workspace
     password), and real
-    `mngr exec` injection/rotation of `runtime/secrets/restic.env` inside the
+    `mngr exec` injection/rotation of `data/.secrets/restic.env` inside the
     resumed workspace container.
     """
     _ensure_restic_on_sandbox_host(tmp_path, monkeypatch)
@@ -914,7 +914,7 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
     repo_two = tmp_path / "restic-repo-2"
 
     def read_workspace_env() -> str:
-        result = _exec_in_container(container_name, "cat /home/user/workspace/runtime/secrets/restic.env", timeout=30)
+        result = _exec_in_container(container_name, "cat /home/user/workspace/data/.secrets/restic.env", timeout=30)
         assert result.returncode == 0, result.stderr
         return result.stdout
 
@@ -940,14 +940,14 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
     # copy was rotated aside inside the container rather than lost.
     corrupted = _exec_in_container(
         container_name,
-        "printf 'RESTIC_REPOSITORY=garbage\n' > /home/user/workspace/runtime/secrets/restic.env",
+        "printf 'RESTIC_REPOSITORY=garbage\n' > /home/user/workspace/data/.secrets/restic.env",
         timeout=30,
     )
     assert corrupted.returncode == 0, corrupted.stderr
     reinject_canonical_env(agent_id=agent_id, paths=paths)
     assert read_workspace_env() == canonical_one
     rotated = _exec_in_container(
-        container_name, "grep -l garbage /home/user/workspace/runtime/secrets/restic.env.*", timeout=30
+        container_name, "grep -l garbage /home/user/workspace/data/.secrets/restic.env.*", timeout=30
     )
     assert rotated.returncode == 0 and rotated.stdout.strip(), (rotated.stdout, rotated.stderr)
 
@@ -978,7 +978,7 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
     # aside, so the backup service reads "not configured" again.
     disable_backups_for_host(agent_id=agent_id, paths=paths)
     assert read_canonical_env(paths, agent_id) is None
-    gone = _exec_in_container(container_name, "test -f /home/user/workspace/runtime/secrets/restic.env", timeout=30)
+    gone = _exec_in_container(container_name, "test -f /home/user/workspace/data/.secrets/restic.env", timeout=30)
     assert gone.returncode != 0, "the workspace restic.env should be rotated aside after disabling"
     archived_after_disable = list((data_dir / "backup_envs").glob(f"{agent_id}.env.*"))
     assert len(archived_after_disable) == 2
@@ -1019,7 +1019,7 @@ def _cp_repo_container_to_host(container_name: str, repository: Path) -> None:
 
 def _restic_env_prefix() -> str:
     """Shell prefix exporting the injected restic.env for an in-container restic call."""
-    return "set -a; . /home/user/workspace/runtime/secrets/restic.env; set +a; "
+    return "set -a; . /home/user/workspace/data/.secrets/restic.env; set +a; "
 
 
 @pytest.mark.minds_snapshot_resume
@@ -1163,7 +1163,7 @@ def test_backup_restore_rewinds_the_resumed_workspace_in_place(
 
     # The injected credentials survived the restore (the snapshot predates
     # them only logically -- the script writes the current env back).
-    env_after = _exec_in_container(container_name, "cat /home/user/workspace/runtime/secrets/restic.env", timeout=30)
+    env_after = _exec_in_container(container_name, "cat /home/user/workspace/data/.secrets/restic.env", timeout=30)
     assert env_after.returncode == 0, env_after.stderr
     assert f"RESTIC_REPOSITORY={repository}" in env_after.stdout
 

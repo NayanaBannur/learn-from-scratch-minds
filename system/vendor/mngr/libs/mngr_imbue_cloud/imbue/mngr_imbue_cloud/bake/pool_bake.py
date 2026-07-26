@@ -55,13 +55,13 @@ DEFAULT_WORKSPACE_TEMPLATE_BAKE_TEMPLATES: Final[tuple[str, ...]] = ("main", "po
 # sentinel. The bootstrap writes it after creating the chat agent on first boot;
 # removing it (after destroying that chat agent) makes the user's first lease +
 # start re-create the chat agent under the user's own workspace name.
-INITIAL_CHAT_SENTINEL_PATH: Final[str] = "/code/runtime/initial_chat_created"
+INITIAL_CHAT_SENTINEL_PATH: Final[str] = "/home/user/workspace/data/.state/initial_chat_created"
 
 # The baked services checkout whose repo-local git identity we clear at finalize
 # time. mngr's cross-host create (GIT_MIRROR) copies the *operator's* ``git config
-# user.name/email`` into ``/mngr/code/.git/config``; on a shared, pre-provisioned
-# pool host that operator is whoever ran the bake (e.g. "Josh Albrecht"), and every
-# adopting user's agent -- which mirrors/worktrees from /mngr/code -- would inherit
+# user.name/email`` into the workspace checkout's ``.git/config``; on a shared,
+# pre-provisioned pool host that operator is whoever ran the bake (e.g. "Josh
+# Albrecht"), and every adopting user's agent -- which shares that checkout -- would inherit
 # it as its commit author. We unset it here rather than substituting a value: on
 # adoption the DEFAULT_WORKSPACE_TEMPLATE bootstrap re-runs its workspace init
 # (its initial-chat signal was removed during this same finalize) and supplies its
@@ -70,14 +70,14 @@ INITIAL_CHAT_SENTINEL_PATH: Final[str] = "/code/runtime/initial_chat_created"
 # template's Bash-command rewrite hook; this only governs the leftover non-agent
 # commits on the shared checkout.) Local ``mngr`` worktree agents are unaffected --
 # they take the GIT_WORKTREE path, which never runs this copy.
-_BAKED_SERVICES_CHECKOUT_PATH: Final[str] = "/mngr/code"
+_BAKED_SERVICES_CHECKOUT_PATH: Final[str] = "/home/user/workspace"
 
 # 30 min: the inner ``mngr create`` builds a fresh Docker image on the host,
 # which can take 10-20 min (network bound).
 _MNGR_CREATE_TIMEOUT_SECONDS: Final[int] = 1800
 
 # Manual rsync excludes layered on top of ``--filter=:- .gitignore`` for the
-# monorepo -> DEFAULT_WORKSPACE_TEMPLATE vendor/mngr sync. The filter handles ``__pycache__`` / ``.venv``
+# monorepo -> DEFAULT_WORKSPACE_TEMPLATE system/vendor/mngr sync. The filter handles ``__pycache__`` / ``.venv``
 # / etc.; these two are NOT in .gitignore: ``.git`` (git's internal dir) and
 # ``uv.lock`` (committed at the mngr root, but each install context regenerates
 # its own).
@@ -180,14 +180,14 @@ def run_mngr_command(
 
 
 def sync_mngr_into_template(mngr_source: Path, workspace_dir: Path) -> None:
-    """Rsync the mngr monorepo into the DEFAULT_WORKSPACE_TEMPLATE workspace's ``vendor/mngr/`` directory.
+    """Rsync the mngr monorepo into the DEFAULT_WORKSPACE_TEMPLATE workspace's ``system/vendor/mngr/`` directory.
 
-    The DEFAULT_WORKSPACE_TEMPLATE Dockerfile COPYs ``vendor/mngr`` and builds the container's mngr from
+    The DEFAULT_WORKSPACE_TEMPLATE Dockerfile COPYs ``system/vendor/mngr`` and builds the container's mngr from
     it, so this populates it (gitignore-filtered) before the bake -- making the
     baked container's mngr match the operator's checkout. Used identically by the
     OVH and slice bakes (both bake the same DEFAULT_WORKSPACE_TEMPLATE image).
     """
-    vendor_mngr = workspace_dir / "vendor" / "mngr"
+    vendor_mngr = workspace_dir / "system" / "vendor" / "mngr"
     vendor_mngr.mkdir(parents=True, exist_ok=True)
     exclude_args: list[str] = []
     for pattern in _VENDOR_RSYNC_MANUAL_EXCLUDES:
@@ -417,7 +417,7 @@ def finalize_baked_pool_host(
        claim flow plus parallel ``mngr observe`` discovery routinely exceeds it.
     2. Clear the baked services checkout's repo-local git identity (best-effort):
        the bake's cross-host create copied the operator's ``git config
-       user.name/email`` into ``/mngr/code``, and adopting users' agents would
+       user.name/email`` into the workspace checkout, and adopting users' agents would
        otherwise inherit the baker as their commit author. Unsetting it lets the
        bootstrap re-supply its neutral fallback on adoption (see
        ``_BAKED_SERVICES_CHECKOUT_PATH``).
@@ -486,9 +486,9 @@ def finalize_baked_pool_host(
         )
 
     logger.info("  Destroying bootstrap-created chat agent: {}", host_name)
-    # Use the canonical in-container mngr invocation (uv run mngr in /mngr/code),
+    # Use the canonical in-container mngr invocation (uv run mngr in the workspace checkout),
     # which works regardless of transport / login PATH in the DEFAULT_WORKSPACE_TEMPLATE image.
-    destroy_command = f"cd /mngr/code && uv run mngr destroy {shlex.quote(host_name)} --force"
+    destroy_command = f"cd /home/user/workspace && uv run mngr destroy {shlex.quote(host_name)} --force"
     destroy_rc, _destroy_out, destroy_err = run_in_container(baked, "chat-destroy", destroy_command, 120.0)
     if destroy_rc != 0:
         raise PoolBakeError(

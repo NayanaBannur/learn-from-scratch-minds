@@ -8,7 +8,7 @@ out of arbitrarily noisy output:
 - the *check* script: verifies the installed backup-service code against the
   *minimum required* ``minds-v*`` tag (fetching tags from the ``official``
   remote only when the tag is missing locally), reports the supervisord state
-  of the ``host-backup`` program and the current ``runtime/secrets/restic.env``
+  of the ``host-backup`` program and the current ``data/.secrets/restic.env``
   (sha256 + content, so minds can compare against its canonical copy and adopt
   externally configured envs).
 - the *gate probe* script: reports which chat agents are actively RUNNING
@@ -79,7 +79,7 @@ import time as _time
 OFFICIAL_REMOTE_NAME = "official"
 DEFAULT_OFFICIAL_REMOTE_URL = "https://github.com/imbue-ai/default-workspace-template.git"
 BACKUP_CODE_PATH = "libs/host_backup"
-RESTIC_ENV_PATH = "runtime/secrets/restic.env"
+RESTIC_ENV_PATH = "data/.secrets/restic.env"
 GIT_IDENTITY = ["-c", "user.name=minds-backup-update", "-c", "user.email=backup-update@minds.local"]
 TICK_COMPLETION_TYPES = (
     "RESTIC_BACKUP_SUCCEEDED",
@@ -642,7 +642,7 @@ _FALLBACK_RESTIC_DIR_NAME = ".minds-restic"
 # them far faster than a human (or the SSE log stream) needs.
 _PROGRESS_INTERVAL_SECONDS = 2.0
 # Fallback excludes for the safety/restored snapshots when the workspace has
-# no readable runtime/backup.toml excludes. Matches host_backup's built-in
+# no readable data/system/backup.toml excludes. Matches host_backup's built-in
 # defaults so those snapshots look like every hourly snapshot; when the user
 # customized excludes in backup.toml, theirs are used instead (read below).
 _DEFAULT_SNAPSHOT_EXCLUDES = (
@@ -777,7 +777,7 @@ def _resolve_restic_binary(backup_root, result):
 def _read_snapshot_excludes(code_dir):
     # The user's current backup.toml excludes, or host_backup's defaults when
     # absent/unreadable.
-    toml_path = _os.path.join(code_dir, "runtime", "backup.toml")
+    toml_path = _os.path.join(code_dir, "data", "system", "backup.toml")
     excludes = list(_DEFAULT_SNAPSHOT_EXCLUDES)
     if _os.path.isfile(toml_path):
         try:

@@ -1,0 +1,1 @@
+`private.just` recipes (sync-vendor-mngr, minds-start, bake helpers) and the minds dev-workflow/release skills follow the default-workspace-template root declutter: the vendored mngr now lives at `system/vendor/mngr/` inside the template.

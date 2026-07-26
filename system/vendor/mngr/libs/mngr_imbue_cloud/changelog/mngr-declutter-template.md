@@ -1,0 +1,1 @@
+The pool bake follows the workspace-template root declutter: the vendored mngr rsyncs into `system/vendor/mngr/`, and the finalize step's stale pre-cutover paths (`/mngr/code` checkout, `/code/runtime/initial_chat_created` sentinel) are updated to the `/home/user/workspace` layout (`data/.state/initial_chat_created`).

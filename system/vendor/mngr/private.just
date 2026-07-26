@@ -263,7 +263,7 @@ minds-test-electron *args: minds-css
 # is an operator/debug harness: it needs Docker + live AI creds, so activate an
 # env with a logged-in account first, e.g.
 #   eval "$(uv run minds env activate dev-josh-1)"
-# It also needs the DEFAULT_WORKSPACE_TEMPLATE external worktree's vendor/mngr synced to this checkout
+# It also needs the DEFAULT_WORKSPACE_TEMPLATE external worktree's system/vendor/mngr synced to this checkout
 # (otherwise the initial chat agent fails to create on settings the vendored mngr
 # doesn't recognize, and the chat step hangs on "Waiting for initial chat
 # agent..."); run `just sync-vendor-mngr .external_worktrees/default-workspace-template`
@@ -291,14 +291,14 @@ minds-css:
 default-workspace-template-worktree branch="" base="origin/main":
     bash scripts/default_workspace_template_worktree.sh "{{branch}}" "{{base}}"
 
-# Sync vendor/mngr in default-workspace-template to this repo's HEAD and commit
+# Sync system/vendor/mngr in default-workspace-template to this repo's HEAD and commit
 # in DEFAULT_WORKSPACE_TEMPLATE. The DEFAULT_WORKSPACE_TEMPLATE checkout path comes from the positional arg, else DEFAULT_WORKSPACE_TEMPLATE_DIR read
 # from a gitignored apps/minds/.env (minds-scoped per-user config -- see
 # apps/minds/.env.example), else $DEFAULT_WORKSPACE_TEMPLATE_DIR in your shell. No personal path is
 # baked in, and nothing outside this recipe loads that .env. Position the mngr
 # checkout at the exact commit you want to vendor first -- your release PR branch
 # HEAD / the verified release SHA, NOT blindly `main`, which can drift past it
-# between verification and merge. The recipe archives HEAD, replaces vendor/mngr/
+# between verification and merge. The recipe archives HEAD, replaces system/vendor/mngr/
 # with that snapshot, and commits in DEFAULT_WORKSPACE_TEMPLATE. Does not push. Aborts if DEFAULT_WORKSPACE_TEMPLATE is dirty.
 # Full release flow: apps/minds/docs/release.md.
 sync-vendor-mngr default_workspace_template="":
@@ -319,11 +319,11 @@ sync-vendor-mngr default_workspace_template="":
         echo "  just sync-vendor-mngr /path/to/default-workspace-template" >&2
         exit 2
     fi
-    if [ ! -d "$default_workspace_template/vendor/mngr" ]; then
-        echo "Error: $default_workspace_template/vendor/mngr not found"
+    if [ ! -d "$default_workspace_template/system/vendor/mngr" ]; then
+        echo "Error: $default_workspace_template/system/vendor/mngr not found"
         exit 1
     fi
-    # Resolve to an absolute path: the recipe `cd`s into $default_workspace_template/vendor/mngr and
+    # Resolve to an absolute path: the recipe `cd`s into $default_workspace_template/system/vendor/mngr and
     # later back to $default_workspace_template, so a relative arg would break the second cd.
     default_workspace_template="$(cd "$default_workspace_template" && pwd)"
     if [ -n "$(git -C "$default_workspace_template" status --porcelain)" ]; then
@@ -337,17 +337,17 @@ sync-vendor-mngr default_workspace_template="":
     tarball=$(mktemp)
     trap "rm -f $tarball" EXIT
     git archive --format=tar HEAD > "$tarball"
-    cd "$default_workspace_template/vendor/mngr"
+    cd "$default_workspace_template/system/vendor/mngr"
     rm -rf ./* ./.[!.]*
     tar -xf "$tarball"
     cd "$default_workspace_template"
-    git add -A vendor/mngr/
-    if git diff --cached --quiet -- vendor/mngr/; then
-        echo "vendor/mngr already in sync with mngr ${short}; nothing to commit"
+    git add -A system/vendor/mngr/
+    if git diff --cached --quiet -- system/vendor/mngr/; then
+        echo "system/vendor/mngr already in sync with mngr ${short}; nothing to commit"
         exit 0
     fi
-    git commit -m "Sync vendor/mngr to ${branch} (${short})" -m "Tracks ${full} in mngr."
-    echo "Synced vendor/mngr to ${branch} (${short}). To publish: (cd $default_workspace_template && git push origin ${branch})"
+    git commit -m "Sync system/vendor/mngr to ${branch} (${short})" -m "Tracks ${full} in mngr."
+    echo "Synced system/vendor/mngr to ${branch} (${short}). To publish: (cd $default_workspace_template && git push origin ${branch})"
 
 
 # === Modal deploy / minds iteration helpers ===
@@ -387,7 +387,7 @@ deploy *args:
 # including staging / production -- instead of only on per-developer dev envs.
 #
 # Always re-syncs the live mngr working tree into the DEFAULT_WORKSPACE_TEMPLATE worktree's
-# vendor/mngr/ first, so the very first Create after starting the app
+# system/vendor/mngr/ first, so the very first Create after starting the app
 # picks up your local mngr code rather than whatever stale snapshot the
 # DEFAULT_WORKSPACE_TEMPLATE worktree was created from. Uses rsync (vs `just sync-vendor-mngr`'s
 # git archive) so uncommitted mngr changes flow through and the DEFAULT_WORKSPACE_TEMPLATE
@@ -418,7 +418,7 @@ minds-install:
 #   just minds-start "" .external_worktrees/my-default-workspace-template-worktree   # 2nd arg = default_workspace_template
 # `default_workspace_template` defaults to .external_worktrees/default-workspace-template; an absolute
 # path is used as-is, a relative one is resolved against the mngr root. This
-# is what gets synced (vendor/mngr/) and exported as MINDS_WORKSPACE_GIT_URL,
+# is what gets synced (system/vendor/mngr/) and exported as MINDS_WORKSPACE_GIT_URL,
 # so point it at whichever DEFAULT_WORKSPACE_TEMPLATE worktree/branch you want to launch against.
 # Refuses to start if another minds-start is already running in this
 # worktree (PID file under /tmp keyed by worktree path). Use `just
@@ -454,9 +454,9 @@ minds-start branch="" default_workspace_template="":
         echo "       then re-run minds-start." >&2
         exit 2
     fi
-    vendor_mngr="$default_workspace_template_wt/vendor/mngr"
+    vendor_mngr="$default_workspace_template_wt/system/vendor/mngr"
     mkdir -p "$vendor_mngr"
-    # The vendor/mngr sync below uses `rsync --filter=':- .gitignore'`, a GNU
+    # The system/vendor/mngr sync below uses `rsync --filter=':- .gitignore'`, a GNU
     # rsync feature. Recent macOS ships Apple's openrsync at /usr/bin/rsync,
     # which doesn't support it and fails the sync with a confusing error --
     # fail fast here with the fix. See apps/minds/README.md (Getting started).
@@ -472,7 +472,7 @@ minds-start branch="" default_workspace_template="":
     # Exclusions must match _RSYNC_MANUAL_EXCLUDES + _GITIGNORE_RSYNC_FILTER
     # in libs/mngr_imbue_cloud/.../cli/admin.py and apps/minds/.../cli/pool.py,
     # and the RSYNC_EXCLUDES array in apps/minds/scripts/propagate_changes --
-    # all four paths populate the same vendor/mngr/ destination.
+    # all four paths populate the same system/vendor/mngr/ destination.
     #
     # `--filter=:- .gitignore` reads .gitignore at each directory level under
     # the source and applies its exclude rules, so __pycache__, .venv,
@@ -555,7 +555,7 @@ minds-start branch="" default_workspace_template="":
 # at a filesystem path + dev branch that no pool host can clone or match --
 # see _operator_workspace_default in desktop_client/templates.py.)
 #
-# It also skips the live-mngr -> vendor/mngr/ rsync that minds-start does on
+# It also skips the live-mngr -> system/vendor/mngr/ rsync that minds-start does on
 # every launch: a leased pool slice already carries the mngr snapshot baked
 # at its tag, so the local working tree is irrelevant to it.
 #
