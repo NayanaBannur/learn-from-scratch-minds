@@ -739,10 +739,11 @@ def test_restore_script_restores_the_nested_host_dir_of_a_volume_level_snapshot(
 
 
 @pytest.mark.timeout(120)
-def test_restore_script_reports_failure_when_the_restored_tree_lacks_code(tmp_path: Path) -> None:
+def test_restore_script_reports_failure_when_the_restored_tree_lacks_a_checkout(tmp_path: Path) -> None:
     # minds validates the subpath before dispatch, so this is a backstop: a
-    # restore that leaves no code/ checkout must report failure (and restart
-    # the services) rather than declare success over a wrecked workspace.
+    # restore that leaves no workspace/ (or legacy code/) checkout must report
+    # failure (and restart the services) rather than declare success over a
+    # wrecked workspace.
     host, code, restic_repo = _make_restore_workspace(tmp_path)
     junk = (tmp_path / "junk").resolve()
     junk.mkdir()
@@ -763,7 +764,7 @@ def test_restore_script_reports_failure_when_the_restored_tree_lacks_code(tmp_pa
     assert payload["status"] == "failed"
     detail = payload["detail"]
     assert isinstance(detail, str)
-    assert "no code/ checkout" in detail
+    assert "no workspace/ or code/ checkout" in detail
     assert payload["services_restarted"] is True
 
 

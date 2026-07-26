@@ -1029,8 +1029,14 @@ def _main():
             "running the restore again picks up where this one stopped." % restore_output[-500:]
         )
         _finish(result, "failed", detail)
-    if not _os.path.isdir(_os.path.join(backup_root, "code")):
-        _finish(result, "failed", "the restore completed but left no code/ checkout at %s" % backup_root)
+    # Sanity-check the restored tree by its repo checkout: workspace/ in the
+    # current layout, code/ in legacy snapshots.
+    if not _os.path.isdir(_os.path.join(backup_root, "workspace")) and not _os.path.isdir(
+        _os.path.join(backup_root, "code")
+    ):
+        _finish(
+            result, "failed", "the restore completed but left no workspace/ or code/ checkout at %s" % backup_root
+        )
     result["restored"] = True
 
     # The snapshot carries whatever restic.env it had at backup time (possibly
