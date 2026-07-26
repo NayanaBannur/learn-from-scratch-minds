@@ -119,9 +119,7 @@ def test_container_config_host_dir_round_trips(store: DockerHostStore) -> None:
     assert result.config.host_dir == "/home/user/.mngr"
 
 
-def test_container_config_host_dir_defaults_to_none_for_legacy_records(
-    store: DockerHostStore, tmp_path: Path
-) -> None:
+def test_container_config_host_dir_defaults_to_none_for_legacy_records(store: DockerHostStore, tmp_path: Path) -> None:
     """A record written before the host_dir field existed loads with host_dir=None.
 
     None means "use the provider config's host_dir", which is what those hosts

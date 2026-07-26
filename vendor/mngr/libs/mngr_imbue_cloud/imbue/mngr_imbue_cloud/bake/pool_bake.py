@@ -248,7 +248,10 @@ def build_pool_create_command(
             "--label",
             f"pool_attributes={attributes_json}",
             "--host-env",
-            "MNGR_HOST_DIR=/mngr",
+            # The workspace layout's container-internal host_dir (matches the
+            # template's provider blocks): agent state lives inside the
+            # persistent /home/user tree.
+            "MNGR_HOST_DIR=/home/user/.mngr",
         ]
     )
     command.extend(extra_args)

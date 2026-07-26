@@ -61,6 +61,7 @@ from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.lima_image.primitives import get_current_image_arch
+from imbue.minds.mngr_settings.provider_blocks import WORKSPACE_HOST_DIR
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import DockerRuntime
@@ -1075,19 +1076,18 @@ def _slugify_account(account: str) -> str:
 def _remote_host_env_flags() -> list[str]:
     """Return the --host-env / --pass-host-env flags for a new remote host.
 
-    Remote containers always store their mngr state under ``/mngr`` (the
-    conventional container-internal path -- this is also what
-    ``_REMOTE_HOST_DIR`` in ``runner.py`` looks for when writing reverse-tunnel
-    API URLs), independent of the local ``MNGR_HOST_DIR`` (which could
-    be ``~/.minds/mngr`` for production or ``~/.minds-<env-name>/mngr``
-    for any other activated env). We only propagate ``MNGR_PREFIX`` so
-    the inner mngr's tmux/session names match the local ones, avoiding
-    confusion when the same name has to refer to the "same" thing on
-    both sides.
+    Remote containers always store their mngr state under the workspace
+    layout's container-internal path (``/home/user/.mngr``, matching the
+    provider blocks' ``host_dir``), independent of the local ``MNGR_HOST_DIR``
+    (which could be ``~/.minds/mngr`` for production or
+    ``~/.minds-<env-name>/mngr`` for any other activated env). We only
+    propagate ``MNGR_PREFIX`` so the inner mngr's tmux/session names match the
+    local ones, avoiding confusion when the same name has to refer to the
+    "same" thing on both sides.
     """
     return [
         "--host-env",
-        "MNGR_HOST_DIR=/mngr",
+        f"MNGR_HOST_DIR={WORKSPACE_HOST_DIR}",
         "--pass-host-env",
         "MNGR_PREFIX",
     ]

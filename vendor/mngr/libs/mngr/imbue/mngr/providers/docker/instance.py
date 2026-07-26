@@ -477,22 +477,26 @@ class DockerProviderInstance(BaseProviderInstance):
         host_id: HostId,
         is_isolated: bool,
         volume_mount_path: str | None,
+        host_dir: str,
     ) -> list[str]:
         """Build the docker CLI args for the host's volume mount.
 
         Returns an empty list when host volumes are disabled. In isolated mode
         the per-host sub-folder of the shared state volume is bound directly at
-        host_dir (or at ``volume_mount_path`` when set, with host_dir living
+        ``host_dir`` (or at ``volume_mount_path`` when set, with host_dir living
         inside it) via `--mount ... volume-subpath=...` (Docker Engine >= 25.0),
-        so the container cannot see sibling hosts' sub-folders. In shared mode
-        the entire state volume is mounted at HOST_VOLUME_MOUNT_PATH and the
-        caller is expected to symlink host_dir into it.
+        so the container cannot see sibling hosts' sub-folders. ``host_dir`` is
+        the host's *effective* host_dir (the recorded per-host value on replay
+        paths), so a restored container mounts the volume where the host's data
+        actually lives. In shared mode the entire state volume is mounted at
+        HOST_VOLUME_MOUNT_PATH and the caller is expected to symlink host_dir
+        into it.
         """
         if not self.config.is_host_volume_created:
             return []
         if is_isolated:
             volume_id = self._volume_id_for_host(host_id)
-            mount_target = volume_mount_path if volume_mount_path is not None else str(self.host_dir)
+            mount_target = volume_mount_path if volume_mount_path is not None else host_dir
             spec = (
                 f"type=volume,source={self._state_volume_name},"
                 f"target={mount_target},volume-subpath=volumes/{volume_id}"
@@ -503,9 +507,23 @@ class DockerProviderInstance(BaseProviderInstance):
     def _configured_volume_mount_path_str(self) -> str | None:
         return str(self.config.volume_mount_path) if self.config.volume_mount_path is not None else None
 
-    def _host_log_dir_str(self) -> str:
-        """Directory for plain-text service logs (shutdown, activity watcher) on hosts."""
-        return resolve_host_log_dir(str(self.host_dir), self.config.host_log_dir)
+    def _effective_host_dir_str(self, config: ContainerConfig) -> str:
+        """The host_dir this host's containers must be provisioned against.
+
+        The recorded per-host value when present; legacy records (written before
+        host_dir was persisted) fall back to the provider config's host_dir,
+        which is what those hosts were actually created with.
+        """
+        return config.host_dir if config.host_dir is not None else str(self.host_dir)
+
+    def _host_log_dir_str(self, host_dir: str) -> str:
+        """Directory for plain-text service logs (shutdown, activity watcher) on hosts.
+
+        Takes the host's effective host_dir so the ``<host_dir>/logs`` default
+        lands next to the data the host actually uses, not wherever the current
+        context's provider config points.
+        """
+        return resolve_host_log_dir(host_dir, self.config.host_log_dir)
 
     def _get_host_volume_symlink_target(self, host_id: HostId, is_isolated: bool) -> str | None:
         """Get the path inside a container that host_dir should symlink to.
@@ -598,6 +616,7 @@ class DockerProviderInstance(BaseProviderInstance):
     def _check_and_install_packages(
         self,
         container: docker.models.containers.Container,
+        host_dir: str,
         host_volume_mount_path: str | None = None,
     ) -> None:
         """Check for required packages and install if missing, with warnings.
@@ -606,7 +625,7 @@ class DockerProviderInstance(BaseProviderInstance):
         to the volume path so data persists on the shared Docker volume.
         """
         check_install_cmd = build_check_and_install_packages_command(
-            str(self.host_dir),
+            host_dir,
             host_volume_mount_path=host_volume_mount_path,
         )
         exit_code, output = self._exec_in_container(container, check_install_cmd)
@@ -622,13 +641,14 @@ class DockerProviderInstance(BaseProviderInstance):
         client_public_key: str,
         host_private_key: str,
         host_public_key: str,
+        host_dir: str,
         ssh_user: str = "root",
         known_hosts: Sequence[str] | None = None,
         authorized_keys: Sequence[str] | None = None,
         host_volume_mount_path: str | None = None,
     ) -> None:
         """Set up SSH access and start sshd in the container."""
-        self._check_and_install_packages(container, host_volume_mount_path=host_volume_mount_path)
+        self._check_and_install_packages(container, host_dir=host_dir, host_volume_mount_path=host_volume_mount_path)
 
         with log_span("Configuring SSH keys in container", ssh_user=ssh_user):
             configure_ssh_cmd = build_configure_ssh_command(
@@ -705,6 +725,10 @@ class DockerProviderInstance(BaseProviderInstance):
         host_key_path, host_public_key = self._get_host_keypair()
         host_private_key = host_key_path.read_text()
 
+        # Provision against the host_dir this host was created with (recorded in
+        # its config), not the current context's -- start/restore can run from a
+        # context whose provider config resolves a different host_dir.
+        host_dir_str = self._effective_host_dir_str(config)
         host_volume_symlink_target = self._get_host_volume_symlink_target(
             host_id, is_isolated=config.is_isolated_host_volume
         )
@@ -713,6 +737,7 @@ class DockerProviderInstance(BaseProviderInstance):
             client_public_key,
             host_private_key,
             host_public_key,
+            host_dir=host_dir_str,
             known_hosts=known_hosts,
             authorized_keys=authorized_keys,
             host_volume_mount_path=host_volume_symlink_target,
@@ -760,7 +785,7 @@ class DockerProviderInstance(BaseProviderInstance):
 
         with log_span("Starting activity watcher in container"):
             start_activity_watcher_cmd = build_start_activity_watcher_command(
-                str(self.host_dir), host_log_dir=self._host_log_dir_str()
+                host_dir_str, host_log_dir=self._host_log_dir_str(host_dir_str)
             )
             self._exec_in_container(container, start_activity_watcher_cmd)
 
@@ -771,7 +796,7 @@ class DockerProviderInstance(BaseProviderInstance):
 
         For Docker, the shutdown script kills PID 1 to stop the container.
         """
-        log_dir_str = self._host_log_dir_str()
+        log_dir_str = self._host_log_dir_str(str(host.host_dir))
 
         script_content = f'''#!/bin/bash
 # Auto-generated shutdown script for mngr Docker host
@@ -1416,6 +1441,7 @@ kill -TERM 1
                         host_id,
                         is_isolated=is_isolated,
                         volume_mount_path=self._configured_volume_mount_path_str(),
+                        host_dir=str(self.host_dir),
                     ),
                 )
 
@@ -1703,6 +1729,7 @@ kill -TERM 1
                     host_id,
                     is_isolated=config.is_isolated_host_volume,
                     volume_mount_path=config.volume_mount_path,
+                    host_dir=self._effective_host_dir_str(config),
                 ),
             )
         except (MngrError, docker.errors.DockerException) as e:

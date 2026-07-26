@@ -175,7 +175,7 @@ def _submit_credentials_via_workspace_endpoint(container_name: str, credential_b
 def _find_chat_agent_id(container_name: str) -> str:
     listing = _exec_in_container(
         container_name,
-        "cd /code && mngr list --format json --on-error continue",
+        "cd /home/user/workspace && mngr list --format json --on-error continue",
         timeout=_IN_CONTAINER_TIMEOUT_SECONDS,
     )
     assert listing.returncode == 0, f"in-container mngr list failed: {listing.stderr}"
@@ -188,7 +188,7 @@ def _find_chat_agent_id(container_name: str) -> str:
 def _chat_and_await_echo(container_name: str, chat_agent_id: str, token: str) -> None:
     messaged = _exec_in_container(
         container_name,
-        f'cd /code && mngr message {chat_agent_id} -m "Reply with exactly this token and nothing else: {token}"',
+        f'cd /home/user/workspace && mngr message {chat_agent_id} -m "Reply with exactly this token and nothing else: {token}"',
         timeout=300,
     )
     assert messaged.returncode == 0, f"mngr message failed: {messaged.stderr}"
@@ -197,7 +197,7 @@ def _chat_and_await_echo(container_name: str, chat_agent_id: str, token: str) ->
     # regardless of) any reply.
     poll = (
         f"for i in $(seq 1 {_CHAT_REPLY_ATTEMPTS}); do "
-        f"cd /code && mngr transcript {chat_agent_id} --role assistant 2>/dev/null | grep -q {token} && exit 0; "
+        f"cd /home/user/workspace && mngr transcript {chat_agent_id} --role assistant 2>/dev/null | grep -q {token} && exit 0; "
         "sleep 5; done; exit 1"
     )
     replied = _exec_in_container(container_name, poll, timeout=_CHAT_REPLY_ATTEMPTS * 5 + 120)

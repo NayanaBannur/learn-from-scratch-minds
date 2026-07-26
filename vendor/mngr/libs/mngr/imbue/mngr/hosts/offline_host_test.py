@@ -64,9 +64,7 @@ def offline_host(fake_provider: MockProviderInstance, temp_mngr_ctx: MngrContext
     )
 
 
-def test_host_dir_defaults_to_provider_instance_host_dir(
-    offline_host: OfflineHost, temp_host_dir: Path
-) -> None:
+def test_host_dir_defaults_to_provider_instance_host_dir(offline_host: OfflineHost, temp_host_dir: Path) -> None:
     assert offline_host.host_dir == temp_host_dir
 
 
