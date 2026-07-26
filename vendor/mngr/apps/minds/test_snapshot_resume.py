@@ -1070,8 +1070,10 @@ def test_backup_restore_rewinds_the_resumed_workspace_in_place(
     paths = WorkspacePaths(data_dir=data_dir)
     # The repository path must be identical on the sandbox host and inside the
     # container (the same RESTIC_REPOSITORY string is read by both), so it
-    # lives under /tmp rather than the per-test tmp_path.
-    repository = Path(f"/tmp/restore-e2e-repo-{get_short_random_string()}")
+    # lives at a fixed absolute path rather than the per-test tmp_path. It must
+    # NOT live under /tmp: the workspace container mounts /tmp as a tmpfs, and
+    # `docker cp` cannot copy into a tmpfs mount.
+    repository = Path(f"/var/tmp/restore-e2e-repo-{get_short_random_string()}")
 
     # Enable backups for real (restic init on the host + env injection into
     # the container), then hand the initialized repository to the container.

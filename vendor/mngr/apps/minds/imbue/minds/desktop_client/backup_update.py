@@ -422,13 +422,14 @@ def _resolve_restore_subpath(
     snapshot: restic_cli.ResticSnapshot,
     parent_cg: ConcurrencyGroup | None,
 ) -> str:
-    """Locate the host-dir subtree inside the snapshot (identified by its ``code/`` checkout).
+    """Locate the workspace subtree inside the snapshot (identified by its repo checkout).
 
-    On plain docker the snapshot root *is* the host dir; on btrfs providers
-    the hourly backup snapshots the whole unified host volume, so the host
-    dir's contents live one level down in a ``host_dir/`` child (next to
-    volume-level ``agents/`` + ``host_state.json``). Resolved here, from
-    minds' own view of the repository, so the in-workspace script only ever
+    The current layout backs up the unified ``/home/user`` tree, whose repo
+    checkout is a ``workspace/`` child; legacy snapshots (pre-layout-move)
+    carry a ``code/`` checkout instead, either at the root (plain docker) or
+    one level down in a ``host_dir/`` child (btrfs providers, which
+    snapshotted the whole unified host volume). Resolved here, from minds'
+    own view of the repository, so the in-workspace script only ever
     consumes a validated ``<snapshot>:<subpath>`` -- restoring the wrong
     level would wreck the workspace.
     """
@@ -441,7 +442,7 @@ def _resolve_restore_subpath(
         parent_cg=parent_cg,
         timeout_seconds=_SNAPSHOT_RESOLVE_TIMEOUT_SECONDS,
     )
-    if f"{root}/code" in root_entries:
+    if f"{root}/workspace" in root_entries or f"{root}/code" in root_entries:
         return root
     nested_root = f"{root}/host_dir"
     if nested_root in root_entries:
@@ -453,10 +454,11 @@ def _resolve_restore_subpath(
             parent_cg=parent_cg,
             timeout_seconds=_SNAPSHOT_RESOLVE_TIMEOUT_SECONDS,
         )
-        if f"{nested_root}/code" in nested_entries:
+        if f"{nested_root}/workspace" in nested_entries or f"{nested_root}/code" in nested_entries:
             return nested_root
     raise BackupProvisioningError(
-        f"Snapshot {snapshot.short_id} does not contain a workspace (no code/ checkout); it cannot be restored"
+        f"Snapshot {snapshot.short_id} does not contain a workspace (no workspace/ or code/ checkout); "
+        "it cannot be restored"
     )
 
 
