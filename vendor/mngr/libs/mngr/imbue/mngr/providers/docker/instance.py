@@ -342,6 +342,18 @@ def _read_local_docker_runtime_spec_by_name() -> dict[str, Mapping[str, object]]
     return {name: spec for name, spec in runtimes.items() if isinstance(spec, dict)}
 
 
+def _recorded_host_dir_override(host_record: HostRecord) -> Path | None:
+    """Return the host_dir this host was created with, or None for legacy records.
+
+    Hosts must be read at the host_dir recorded at creation time -- the provider
+    config resolved in the current context (e.g. `mngr list` run outside the repo
+    whose settings customized host_dir) can disagree with it.
+    """
+    if host_record.config is None or host_record.config.host_dir is None:
+        return None
+    return Path(host_record.config.host_dir)
+
+
 class DockerProviderInstance(BaseProviderInstance):
     """Provider instance for managing Docker containers as hosts.
 
@@ -735,6 +747,7 @@ class DockerProviderInstance(BaseProviderInstance):
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
+            host_dir_override=Path(config.host_dir) if config.host_dir is not None else None,
             on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
                 callback_host_id, certified_data
             ),
@@ -1283,6 +1296,7 @@ kill -TERM 1
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
+            host_dir_override=_recorded_host_dir_override(host_record),
             on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
                 callback_host_id, certified_data
             ),
@@ -1305,6 +1319,7 @@ kill -TERM 1
                 certified_host_data=host_record.certified_host_data,
                 provider_instance=self,
                 mngr_ctx=self.mngr_ctx,
+                host_dir_override=_recorded_host_dir_override(host_record),
                 on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
                     callback_host_id, certified_data
                 ),
@@ -1431,6 +1446,7 @@ kill -TERM 1
             image=base_image,
             is_isolated_host_volume=is_isolated,
             volume_mount_path=self._configured_volume_mount_path_str(),
+            host_dir=str(self.host_dir),
         )
 
         lifecycle_options = lifecycle if lifecycle is not None else HostLifecycleOptions()
@@ -2273,12 +2289,25 @@ kill -TERM 1
 
         Returns a HostVolume backed by a sub-folder of the state volume
         at volumes/vol-<host_hex>/. Returns None when host volumes are disabled.
+
+        The returned volume is rooted at the host's *host_dir* (the HostVolume
+        contract): when the host was created with a volume_mount_path above
+        host_dir (e.g. the volume mounted at /home/user with host_dir at
+        /home/user/.mngr), the volume is scoped down to host_dir's subpath so
+        agent state stays addressable at the same relative paths.
         """
         if not self.config.is_host_volume_created:
             return None
         host_id = host.id if isinstance(host, HostInterface) else host
         volume_id = self._volume_id_for_host(host_id)
         scoped_volume = self._state_volume.scoped(f"volumes/{volume_id}")
+        host_record = self._host_store.read_host_record(host_id)
+        if host_record is not None and host_record.config is not None:
+            record_config = host_record.config
+            if record_config.volume_mount_path is not None and record_config.host_dir is not None:
+                host_dir_in_volume = Path(record_config.host_dir).relative_to(Path(record_config.volume_mount_path))
+                if str(host_dir_in_volume) != ".":
+                    scoped_volume = scoped_volume.scoped(str(host_dir_in_volume))
         return HostVolume(volume=scoped_volume)
 
     def _ensure_host_volume_dir(self, host_id: HostId) -> None:
