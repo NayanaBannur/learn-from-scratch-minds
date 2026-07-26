@@ -70,7 +70,7 @@ INITIAL_CHAT_SENTINEL_PATH: Final[str] = "/home/user/workspace/data/.state/initi
 # template's Bash-command rewrite hook; this only governs the leftover non-agent
 # commits on the shared checkout.) Local ``mngr`` worktree agents are unaffected --
 # they take the GIT_WORKTREE path, which never runs this copy.
-_BAKED_SERVICES_CHECKOUT_PATH: Final[str] = "/home/user/workspace"
+BAKED_SERVICES_CHECKOUT_PATH: Final[str] = "/home/user/workspace"
 
 # 30 min: the inner ``mngr create`` builds a fresh Docker image on the host,
 # which can take 10-20 min (network bound).
@@ -420,7 +420,7 @@ def finalize_baked_pool_host(
        user.name/email`` into the workspace checkout, and adopting users' agents would
        otherwise inherit the baker as their commit author. Unsetting it lets the
        bootstrap re-supply its neutral fallback on adoption (see
-       ``_BAKED_SERVICES_CHECKOUT_PATH``).
+       ``BAKED_SERVICES_CHECKOUT_PATH``).
     3. Wait for the DEFAULT_WORKSPACE_TEMPLATE bootstrap's initial-chat sentinel, then destroy the
        bootstrap-created chat agent (named after the bake host) and remove the
        sentinel -- so the user's first lease re-creates the chat agent under their
@@ -439,7 +439,7 @@ def finalize_baked_pool_host(
         logger.warning("Could not harden container sshd for {} (exit {}): {}", host_name, sshd_rc, sshd_err.strip())
 
     # Clear the operator's git identity that the bake's cross-host create copied
-    # into the baked services checkout (see _BAKED_SERVICES_CHECKOUT_PATH). Runs
+    # into the baked services checkout (see BAKED_SERVICES_CHECKOUT_PATH). Runs
     # before the sentinel wait so it applies even on hosts where the bootstrap never
     # made a chat agent. Best-effort: the Bash-command rewrite hook is the
     # authoritative per-agent attribution, so a transient failure here shouldn't
@@ -447,7 +447,7 @@ def finalize_baked_pool_host(
     # when the key is already absent; `|| [ $? -eq 5 ]` treats that as success so a
     # checkout that never inherited an identity isn't reported as a failure, while a
     # real error (e.g. not a git repo) still surfaces as a non-5 exit.
-    checkout = shlex.quote(_BAKED_SERVICES_CHECKOUT_PATH)
+    checkout = shlex.quote(BAKED_SERVICES_CHECKOUT_PATH)
     git_identity_command = (
         f"git -C {checkout} config --local --unset user.name || [ $? -eq 5 ]; "
         f"git -C {checkout} config --local --unset user.email || [ $? -eq 5 ]"
@@ -488,7 +488,7 @@ def finalize_baked_pool_host(
     logger.info("  Destroying bootstrap-created chat agent: {}", host_name)
     # Use the canonical in-container mngr invocation (uv run mngr in the workspace checkout),
     # which works regardless of transport / login PATH in the DEFAULT_WORKSPACE_TEMPLATE image.
-    destroy_command = f"cd /home/user/workspace && uv run mngr destroy {shlex.quote(host_name)} --force"
+    destroy_command = f"cd {checkout} && uv run mngr destroy {shlex.quote(host_name)} --force"
     destroy_rc, _destroy_out, destroy_err = run_in_container(baked, "chat-destroy", destroy_command, 120.0)
     if destroy_rc != 0:
         raise PoolBakeError(

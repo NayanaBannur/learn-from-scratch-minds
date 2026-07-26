@@ -12,7 +12,7 @@ This skill covers the full minds dev cycle: standing up a DEFAULT_WORKSPACE_TEMP
 The minds stack has four components that need to stay in sync:
 
 1. **minds desktop client** (`apps/minds/`) -- Electron app + FastAPI backend that runs locally, proxies to agent web servers
-2. **system_interface** (lives in `default-workspace-template/apps/system_interface/`, distributed as the `system-interface` CLI) -- FastAPI + web UI that runs INSIDE the agent's Docker container as a background service
+2. **system_interface** (lives in `default-workspace-template/system/libs/system_interface/`, distributed as the `system-interface` CLI) -- FastAPI + web UI that runs INSIDE the agent's Docker container as a background service
 3. **mngr core** (`libs/mngr/`) -- the agent management CLI
 4. **default-workspace-template** -- the template repo that defines the Docker container (Dockerfile, services.toml, skills, scripts)
 
@@ -197,7 +197,7 @@ If this chain breaks (orphaned `mngr observe`/`mngr event` processes appear), so
 
 ### Editable installs
 
-The DEFAULT_WORKSPACE_TEMPLATE Docker build installs mngr (`system/vendor/mngr/libs/mngr`) and the system_interface (`apps/system_interface/`) editable via `uv tool install -e`, run by `scripts/build_workspace.sh` (which the Dockerfile invokes with `RUN bash`), so Python code changes in either location are picked up immediately after rsync. Frontend changes require the `npm run build` step (done automatically by `propagate_changes`).
+The DEFAULT_WORKSPACE_TEMPLATE Docker build installs mngr (`system/vendor/mngr/libs/mngr`) and the system_interface (`system/libs/system_interface/`) editable via `uv tool install -e`, run by `system/scripts/build_workspace.sh` (which the Dockerfile invokes with `RUN bash`), so Python code changes in either location are picked up immediately after rsync. Frontend changes require the `npm run build` step (done automatically by `propagate_changes`).
 
 ### Template settings
 

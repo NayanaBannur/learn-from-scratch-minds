@@ -32,12 +32,16 @@ from imbue.minds.testing import tag_newer_release_content
 from imbue.minds.testing import write_stub_supervisorctl
 
 
-def _make_workspace_repo(tmp_path: Path) -> Path:
-    """A git repo shaped like a workspace: libs/host_backup + a tagged version."""
+def _make_workspace_repo(tmp_path: Path, *, code_path: str = "libs/host_backup") -> Path:
+    """A git repo shaped like a workspace: the backup-service code dir + an unrelated file.
+
+    ``code_path`` is the repo-relative backup-service directory (pass
+    ``system/libs/host_backup`` for a repo shaped like the decluttered template).
+    """
     repo = tmp_path / "workspace"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True, capture_output=True, timeout=60)
-    backup_dir = repo / "libs" / "host_backup"
+    backup_dir = repo / code_path
     backup_dir.mkdir(parents=True)
     (backup_dir / "service.py").write_text("VERSION = 1\n")
     (repo / "other.txt").write_text("unrelated\n")
@@ -176,6 +180,20 @@ def test_check_script_reports_outdated_when_tag_is_not_an_ancestor(tmp_path: Pat
     # The tag lives on a side branch ahead of main: main's content differs and
     # does not contain the tag -> outdated.
     tag_newer_release_content(repo)
+    stub_bin = _make_stub_bin(tmp_path)
+    run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minimum-tag", "minds-v2.0.0"), extra_path=stub_bin)
+    payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["code_state"] == "outdated"
+
+
+def test_check_script_reports_outdated_on_a_new_layout_workspace(tmp_path: Path) -> None:
+    # A workspace shaped like the decluttered template keeps the backup code at
+    # system/libs/host_backup. The check must diff that path (a stale
+    # libs/host_backup filter would match nothing on either side and wrongly
+    # read "matches").
+    repo = _make_workspace_repo(tmp_path, code_path="system/libs/host_backup")
+    tag_newer_release_content(repo, code_path="system/libs/host_backup")
     stub_bin = _make_stub_bin(tmp_path)
     run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minimum-tag", "minds-v2.0.0"), extra_path=stub_bin)
     payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
@@ -430,6 +448,26 @@ def test_apply_update_commits_tag_content_and_restores_stash(tmp_path: Path) -> 
     # The user's uncommitted work came back.
     assert (repo / "other.txt").read_text() == "user edit in progress\n"
     assert (repo / "untracked.txt").read_text() == "scratch\n"
+
+
+def test_apply_update_converges_new_layout_code_to_the_tag(tmp_path: Path) -> None:
+    # On a decluttered-template workspace the update must converge
+    # system/libs/host_backup (a stale libs/host_backup checkout would fail or
+    # touch nothing).
+    repo = _make_workspace_repo(tmp_path, code_path="system/libs/host_backup")
+    tag_newer_release_content(repo, code_path="system/libs/host_backup")
+
+    stub_bin = _make_stub_bin(tmp_path)
+    run = _run_script(
+        repo, BACKUP_APPLY_UPDATE_SCRIPT, ("--minds-version", "2.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
+    )
+    payload = extract_marker_json(run["stdout"], UPDATE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["status"] == "ok", payload
+    assert payload["committed"] is True
+    assert (repo / "system" / "libs" / "host_backup" / "service.py").read_text() == "VERSION = 2\n"
+    subject = run_git_for_backup_test(repo, "log", "-1", "--format=%s").strip()
+    assert subject == "backup-update: minds-v2.0.0"
 
 
 def test_apply_update_removes_files_deleted_in_the_target_tag(tmp_path: Path) -> None:
@@ -860,15 +898,18 @@ def test_restore_script_skips_the_safety_snapshot_only_when_asked(tmp_path: Path
 
 
 @pytest.mark.timeout(120)
-def test_restore_script_honors_the_current_backup_toml_excludes(tmp_path: Path) -> None:
+@pytest.mark.parametrize("backup_toml_relpath", ["data/system/backup.toml", "runtime/backup.toml"])
+def test_restore_script_honors_the_current_backup_toml_excludes(tmp_path: Path, backup_toml_relpath: str) -> None:
     # The safety snapshot must look like the user's hourly snapshots: when
-    # data/system/backup.toml customizes excludes, those excludes (not the
-    # defaults) shape the safety snapshot -- otherwise a user who excluded a
-    # huge data dir would get a surprise multi-GB pre-restore backup.
+    # backup.toml customizes excludes, those excludes (not the defaults)
+    # shape the safety snapshot -- otherwise a user who excluded a huge data
+    # dir would get a surprise multi-GB pre-restore backup. The file lives at
+    # data/system/backup.toml on decluttered workspaces and runtime/backup.toml
+    # on pre-declutter ones; both locations must be honored.
     host, code, restic_repo = _make_restore_workspace(tmp_path)
     _restic_for_test(restic_repo, "backup", str(host))
     snapshot_id = _snapshot_entries(restic_repo)[0]["id"]
-    backup_toml = code / "data" / "system" / "backup.toml"
+    backup_toml = code / backup_toml_relpath
     backup_toml.parent.mkdir(parents=True, exist_ok=True)
     backup_toml.write_text('excludes = ["**/excluded-dir"]\n')
     excluded = code / "excluded-dir"

@@ -131,8 +131,8 @@ class ImbueCloudHost(Host):
         When the pre-baked agent's ``data.json`` is still present on the
         leased container (the common case, right after a fresh lease), we
         skip the file transfer and return the recorded ``work_dir`` -- the
-        default workspace template baked it (``target_path = "/code/"`` for the vultr
-        template, etc.) and we just trust whatever was written.
+        default workspace template baked it (``target_path = "/home/user/workspace/"``
+        in the template's provider blocks) and we just trust whatever was written.
 
         Otherwise, fall through to mngr's standard ``create_agent_work_dir``
         which runs the configured transfer mode against ``host`` / ``path``.

@@ -29,7 +29,12 @@ export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1700000000}"
 # gets baked. Put it on PATH for the whole bake so every DEFAULT_WORKSPACE_TEMPLATE script finds uv.
 export PATH="/root/.local/bin:$PATH"
 
-REPO_ROOT=/mngr/code
+# Exported: the decluttered template's install_dependencies.sh / build_workspace.sh
+# read REPO_ROOT from the env and default it to /home/user/workspace, which does not
+# exist in the bake VM (and /home/* is wiped below to strip host identity), so they
+# must be pointed at the bake clone. Pre-declutter refs default REPO_ROOT to
+# /mngr/code already, so the export is a no-op for them.
+export REPO_ROOT=/mngr/code
 
 echo "==> Installing minimal bootstrap packages (git for clone, btrfs-progs for the data-disk mode)"
 apt-get update
@@ -47,16 +52,23 @@ git config --global --add safe.directory "$REPO_ROOT"
 echo "==> Running the DEFAULT_WORKSPACE_TEMPLATE toolchain build (setup_system -> install_dependencies -> build_workspace)"
 # These are the exact scripts the Lima create template runs (DEFAULT_WORKSPACE_TEMPLATE
 # .mngr/settings.toml [create_templates.lima] extra_provision_command), so baking
-# them makes the create-time run idempotent + fast.
-bash "$REPO_ROOT/scripts/setup_system.sh"
-bash "$REPO_ROOT/scripts/install_dependencies.sh"
-bash "$REPO_ROOT/scripts/build_workspace.sh"
+# them makes the create-time run idempotent + fast. They live at system/scripts/
+# on the decluttered template layout and scripts/ on pre-declutter refs; resolve
+# from the cloned tree so both bake.
+if [ -d "$REPO_ROOT/system/scripts" ]; then
+  TEMPLATE_SCRIPTS_DIR="$REPO_ROOT/system/scripts"
+else
+  TEMPLATE_SCRIPTS_DIR="$REPO_ROOT/scripts"
+fi
+bash "$TEMPLATE_SCRIPTS_DIR/setup_system.sh"
+bash "$TEMPLATE_SCRIPTS_DIR/install_dependencies.sh"
+bash "$TEMPLATE_SCRIPTS_DIR/build_workspace.sh"
 
 echo "==> Baking deferred packages (Playwright/Chromium) so first boot does not pay for them"
 # deferred_install.sh writes per-package markers under /var/lib/minds so the
 # runtime one-shot no-ops once baked.
-if [ -f "$REPO_ROOT/scripts/deferred_install.sh" ]; then
-  bash "$REPO_ROOT/scripts/deferred_install.sh" || echo "WARNING: deferred_install.sh failed; first boot will install on demand"
+if [ -f "$TEMPLATE_SCRIPTS_DIR/deferred_install.sh" ]; then
+  bash "$TEMPLATE_SCRIPTS_DIR/deferred_install.sh" || echo "WARNING: deferred_install.sh failed; first boot will install on demand"
 fi
 
 echo "==> Reproducibility + size cleanups (delta-friendly; CDC tolerates block shift)"

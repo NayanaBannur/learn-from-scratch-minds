@@ -3,7 +3,7 @@
 `default-workspace-template` (DEFAULT_WORKSPACE_TEMPLATE) vendors a full copy of the mngr monorepo at
 `system/vendor/mngr/`. The DEFAULT_WORKSPACE_TEMPLATE Docker build installs the container's `mngr` from that
 directory editable (`uv tool install -e system/vendor/mngr/libs/mngr`, run by
-`scripts/build_workspace.sh`), so whatever lands in `system/vendor/mngr/` *is* the
+`system/scripts/build_workspace.sh`), so whatever lands in `system/vendor/mngr/` *is* the
 mngr that runs inside every agent.
 
 `system/vendor/mngr/` is a plain copied-in snapshot. It is **not** a git subtree and

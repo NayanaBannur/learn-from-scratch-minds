@@ -179,7 +179,7 @@ def _rewrite_container_host_name(
     The pool host's ``/mngr/data.json`` was written at bake time with the
     bake's per-bake unique placeholder host name (``pool-<hex>-host``).
     The DEFAULT_WORKSPACE_TEMPLATE bootstrap reads that file to decide what to name the initial
-    chat agent (see ``default-workspace-template/libs/bootstrap/src/bootstrap/
+    chat agent (see ``default-workspace-template/system/libs/bootstrap/src/bootstrap/
     manager.py:_read_host_name``). Without this rewrite, every lease would
     end up with a chat agent named after the bake's placeholder instead
     of the user's chosen workspace name.

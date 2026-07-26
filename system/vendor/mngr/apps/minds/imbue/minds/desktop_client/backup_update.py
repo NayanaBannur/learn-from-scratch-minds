@@ -611,7 +611,7 @@ def _run_restore_phases(
         reinject_canonical_env(agent_id=agent_id, paths=paths, parent_cg=parent_cg)
 
     # Phase 4 (default-on): converge the backup-service code afterwards. The
-    # restored snapshot may carry arbitrarily old libs/host_backup code; the
+    # restored snapshot may carry arbitrarily old backup-service code; the
     # idempotent update brings it back to the current version. Its failure
     # must not fail the operation -- the user's data is restored, which is
     # what they asked for -- so it downgrades to a completion warning.

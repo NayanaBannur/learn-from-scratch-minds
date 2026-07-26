@@ -49,6 +49,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_imbue_cloud.bake.pool_bake import BAKED_SERVICES_AGENT_NAME
+from imbue.mngr_imbue_cloud.bake.pool_bake import BAKED_SERVICES_CHECKOUT_PATH
 from imbue.mngr_imbue_cloud.bake.pool_bake import BakedPoolHost
 from imbue.mngr_imbue_cloud.bake.pool_bake import PoolBakeError
 from imbue.mngr_imbue_cloud.bake.pool_bake import bake_pool_host
@@ -711,7 +712,10 @@ def _bake_one_slice(
             # container (the operator's mngr can't resolve the slice's in-memory
             # forwarded ports, so the OVH local-stop approach can't be reused here).
             stop_rc, _stop_out, stop_err = _slice_run_in_container(
-                baked, "stop-services", f"cd /mngr/code && uv run mngr stop {BAKED_SERVICES_AGENT_NAME}", 120.0
+                baked,
+                "stop-services",
+                f"cd {BAKED_SERVICES_CHECKOUT_PATH} && uv run mngr stop {BAKED_SERVICES_AGENT_NAME}",
+                120.0,
             )
             if stop_rc != 0:
                 raise BareMetalProvisioningError(

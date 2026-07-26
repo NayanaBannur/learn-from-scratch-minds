@@ -766,7 +766,7 @@ def _run_from_arguments(arguments: RenameCliArguments) -> None:
             _regenerate_lockfile(repo_root)
     if arguments.is_apply:
         click.echo(
-            "\nfollow-ups: refresh vendor/mngr via `just sync-vendor-mngr`, "
+            "\nfollow-ups: refresh system/vendor/mngr via `just sync-vendor-mngr`, "
             "update any personal FCT_DIR env/.env entries, "
             "run the full test suites in both repos, and never create a new repo at the old GitHub name "
             "(it would break the rename redirects). Open branches: run this script from the branch "

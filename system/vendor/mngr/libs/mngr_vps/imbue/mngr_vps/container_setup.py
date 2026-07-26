@@ -1203,7 +1203,7 @@ def _clone_build_context_for_self_contained_git(local_context: Path, git_depth: 
             if clone_result.returncode != 0:
                 raise MngrError(f"Failed to clone build context: {clone_result.stderr.strip()}")
             # Overlay the working tree (committed + uncommitted edits, e.g. a
-            # locally-rsynced ``vendor/mngr/``) on top of the fresh clone; the
+            # locally-rsynced ``system/vendor/mngr/``) on top of the fresh clone; the
             # clone alone rolls the context back to HEAD. A depth-only clone of a
             # bare repo has no working tree to overlay.
             if is_git_repo:

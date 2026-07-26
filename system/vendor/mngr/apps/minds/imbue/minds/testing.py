@@ -167,17 +167,21 @@ def write_stub_supervisorctl(
     return stub
 
 
-def tag_newer_release_content(repo: Path, *, removed_file: str | None = None) -> None:
+def tag_newer_release_content(
+    repo: Path, *, removed_file: str | None = None, code_path: str = "libs/host_backup"
+) -> None:
     """Commit newer backup code on a side branch and tag it ``minds-v2.0.0``.
 
     HEAD (main) then reads as *outdated* relative to the tag. ``removed_file``
     additionally deletes that path inside the release commit, for exercising
-    convergence onto a tag that removed a file.
+    convergence onto a tag that removed a file. ``code_path`` is the repo-relative
+    backup-service directory (pass ``system/libs/host_backup`` for a repo shaped
+    like the decluttered template).
     """
     run_git_for_backup_test(repo, "checkout", "-q", "-b", "release")
     if removed_file is not None:
         run_git_for_backup_test(repo, "rm", "-q", removed_file)
-    (repo / "libs" / "host_backup" / "service.py").write_text("VERSION = 2\n")
+    (repo / code_path / "service.py").write_text("VERSION = 2\n")
     run_git_for_backup_test(repo, "add", "-A")
     run_git_for_backup_test(repo, "commit", "-q", "-m", "release content")
     run_git_for_backup_test(repo, "tag", "minds-v2.0.0")

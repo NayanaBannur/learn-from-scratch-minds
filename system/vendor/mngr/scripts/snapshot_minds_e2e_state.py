@@ -161,8 +161,8 @@ _IN_SANDBOX_RUNNER_PROGRAM: Final[str] = textwrap.dedent(
     create_workspace_via_electron(default_workspace_template_path, workspace_name, debug_port)
     # IMPORTANT: do NOT call destroy_agent_best_effort here. The whole
     # point of this script is to leave the workspace agent + Docker
-    # container's on-disk state (volumes, /code, /worktree, the
-    # bootstrap-written runtime/, etc.) captured by snapshot_filesystem.
+    # container's on-disk state (volumes, /home/user/workspace, the
+    # bootstrap-written data/, etc.) captured by snapshot_filesystem.
     # But we DO want the container itself stopped cleanly before the
     # snapshot fires, so its filesystem state is consistent (no
     # half-written sqlite WALs, no inflight tmux pty writes, etc.)

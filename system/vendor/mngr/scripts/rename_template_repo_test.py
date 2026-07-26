@@ -163,6 +163,7 @@ def test_skip_reason() -> None:
     assert skip_reason(Path("blueprint/foo/plan.md")) is not None
     assert skip_reason(Path("dev/changelog/entry.md")) is not None
     assert skip_reason(Path("vendor/mngr/justfile")) is not None
+    assert skip_reason(Path("system/vendor/mngr/justfile")) is not None
     assert skip_reason(Path("apps/minds/CHANGELOG.md")) is not None
     assert skip_reason(Path("apps/minds/UNABRIDGED_CHANGELOG.md")) is not None
     assert skip_reason(Path("uv.lock")) is not None

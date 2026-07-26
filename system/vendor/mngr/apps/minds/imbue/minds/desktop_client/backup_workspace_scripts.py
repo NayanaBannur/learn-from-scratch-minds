@@ -16,7 +16,8 @@ out of arbitrarily noisy output:
   services agent -- worktree/worker agents live elsewhere and never count)
   and whether a backup tick is currently in flight.
 - the *apply update* script: the single mutating step -- stash, check out
-  ``libs/host_backup`` at the target tag, commit ``backup-update: <tag>``,
+  the backup-service code (``system/libs/host_backup``, or ``libs/host_backup``
+  on pre-declutter workspaces) at the target tag, commit ``backup-update: <tag>``,
   ``uv sync``, restart the service, verify it comes back, and auto-rollback
   (``git revert``) on failure. Optionally stops running chats first.
 - the *restore* script: rewinds the whole backup root to a chosen restic
@@ -78,7 +79,11 @@ import time as _time
 
 OFFICIAL_REMOTE_NAME = "official"
 DEFAULT_OFFICIAL_REMOTE_URL = "https://github.com/imbue-ai/default-workspace-template.git"
-BACKUP_CODE_PATH = "libs/host_backup"
+# The backup-service code inside the workspace: system/libs/host_backup on the
+# decluttered template layout, libs/host_backup on pre-declutter workspaces.
+# Resolved from the workspace's own tree (cwd is always the workspace root) so
+# the check diff and the update checkout target the path that exists here.
+BACKUP_CODE_PATH = "system/libs/host_backup" if _os.path.isdir("system/libs/host_backup") else "libs/host_backup"
 RESTIC_ENV_PATH = "data/.secrets/restic.env"
 GIT_IDENTITY = ["-c", "user.name=minds-backup-update", "-c", "user.email=backup-update@minds.local"]
 TICK_COMPLETION_TYPES = (
@@ -642,7 +647,7 @@ _FALLBACK_RESTIC_DIR_NAME = ".minds-restic"
 # them far faster than a human (or the SSE log stream) needs.
 _PROGRESS_INTERVAL_SECONDS = 2.0
 # Fallback excludes for the safety/restored snapshots when the workspace has
-# no readable data/system/backup.toml excludes. Matches host_backup's built-in
+# no readable backup.toml excludes. Matches host_backup's built-in
 # defaults so those snapshots look like every hourly snapshot; when the user
 # customized excludes in backup.toml, theirs are used instead (read below).
 _DEFAULT_SNAPSHOT_EXCLUDES = (
@@ -776,8 +781,13 @@ def _resolve_restic_binary(backup_root, result):
 
 def _read_snapshot_excludes(code_dir):
     # The user's current backup.toml excludes, or host_backup's defaults when
-    # absent/unreadable.
+    # absent/unreadable. The file lives at data/system/backup.toml on the
+    # decluttered template layout and runtime/backup.toml on pre-declutter
+    # workspaces; read whichever exists so the safety/restored snapshots
+    # honor the same excludes as the workspace's own hourly snapshots.
     toml_path = _os.path.join(code_dir, "data", "system", "backup.toml")
+    if not _os.path.isfile(toml_path):
+        toml_path = _os.path.join(code_dir, "runtime", "backup.toml")
     excludes = list(_DEFAULT_SNAPSHOT_EXCLUDES)
     if _os.path.isfile(toml_path):
         try:

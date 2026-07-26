@@ -12,16 +12,16 @@ The desktop client (`minds run`) provides:
 - Authentication via one-time codes and signed cookies
 - A landing page listing all accessible workspaces (or a creation form if none exist). Local (`docker` / `lima`) minds show a live container-status badge and a Start/Stop button (Stop asks for confirmation); the status comes from the discovery snapshot's host state (a user-issued Start/Stop flips it immediately via an optimistic override), and the same liveness drives the quit-time shutdown prompt (see `desktop-app.md`).
 - Agent creation from git repositories or local paths via a web form or API
-- Byte-forwarding of HTTP and WebSocket traffic from `<agent-id>.localhost:8420/*` to the workspace's own system interface (the `system-interface` CLI, source at `default-workspace-template/apps/system_interface/`; optionally through an SSH tunnel for remote agents)
+- Byte-forwarding of HTTP and WebSocket traffic from `<agent-id>.localhost:8420/*` to the workspace's own system interface (the `system-interface` CLI, source at `default-workspace-template/system/libs/system_interface/`; optionally through an SSH tunnel for remote agents)
 
-Each workspace runs its own system interface (the `system-interface` CLI, source at `default-workspace-template/apps/system_interface/`), which serves the dockview UI and multiplexes the workspace's services under `/service/<name>/...` paths (Service Worker bootstrap, HTML/cookie rewriting, and WebSocket shims live there, not in the desktop client). Browsers access a workspace at `http://<agent-id>.localhost:8420/` and its individual services at `http://<agent-id>.localhost:8420/service/<service_name>/`.
+Each workspace runs its own system interface (the `system-interface` CLI, source at `default-workspace-template/system/libs/system_interface/`), which serves the dockview UI and multiplexes the workspace's services under `/service/<name>/...` paths (Service Worker bootstrap, HTML/cookie rewriting, and WebSocket shims live there, not in the desktop client). Browsers access a workspace at `http://<agent-id>.localhost:8420/` and its individual services at `http://<agent-id>.localhost:8420/service/<service_name>/`.
 
 ### Agent container (runs in Docker)
 
 Inside each agent's Docker container:
 - **Claude Code** runs as the main agent process in tmux window 0
 - The **bootstrap** (`uv run bootstrap`) runs first-boot setup and then execs `supervisord -n`, which supervises the background services declared as `[program:*]` sections in `supervisord.conf` (logs under `/var/log/supervisor`)
-- Services register their ports via `scripts/forward_port.py` into `data/.state/applications.toml`
+- Services register their ports via `system/scripts/forward_port.py` into `data/.state/applications.toml`
 - An **app watcher** service monitors `applications.toml`, reconciles with the Cloudflare forwarding API, and writes service events to `events/services/events.jsonl`
 - A **cloudflared** service watches `data/.secrets` for a tunnel token and manages the Cloudflare tunnel
 - A **telegram bot** watches for incoming messages and forwards them to the agent via `mngr message`
