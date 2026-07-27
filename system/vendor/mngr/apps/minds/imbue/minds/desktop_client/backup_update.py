@@ -27,6 +27,7 @@ the ``BLOCKED_BY_RUNNING_CHATS:`` prefix so the UI can offer the
 "Stop all chats and retry" action.
 """
 
+from collections.abc import Callable
 from typing import Final
 
 from loguru import logger
@@ -644,6 +645,7 @@ def run_backup_configure_sequence(
     parent_cg: ConcurrencyGroup | None,
     registry: WorkspaceOperationRegistryInterface,
     is_destination_change: bool,
+    quota_evictor: Callable[[], bool] | None = None,
 ) -> None:
     """Worker-thread entry point for the enable / change-destination operation.
 
@@ -659,6 +661,7 @@ def run_backup_configure_sequence(
                 imbue_cloud_cli=imbue_cloud_cli,
                 paths=paths,
                 parent_cg=parent_cg,
+                quota_evictor=quota_evictor,
             )
         else:
             configure_backups_for_host(
@@ -668,6 +671,7 @@ def run_backup_configure_sequence(
                 imbue_cloud_cli=imbue_cloud_cli,
                 paths=paths,
                 parent_cg=parent_cg,
+                quota_evictor=quota_evictor,
             )
     except (BackupProvisioningError, ImbueCloudCliError) as exc:
         logger.warning("Backup configure for {} failed: {}", agent_id, exc)

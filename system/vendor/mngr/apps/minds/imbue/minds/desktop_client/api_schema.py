@@ -53,6 +53,7 @@ from imbue.minds.desktop_client.api_models import BackupServiceConfigureRequest
 from imbue.minds.desktop_client.api_models import BackupServiceUpdateRequest
 from imbue.minds.desktop_client.api_models import BackupVerificationToggleRequest
 from imbue.minds.desktop_client.api_models import BugReportRequest
+from imbue.minds.desktop_client.api_models import CreateAttemptDiscardStatusResponse
 from imbue.minds.desktop_client.api_models import CreateOperationStatusResponse
 from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
 from imbue.minds.desktop_client.api_models import DestroyOperationStatusResponse
@@ -67,6 +68,7 @@ from imbue.minds.desktop_client.api_models import RestartWorkspaceRequest
 from imbue.minds.desktop_client.api_models import SharingReadinessResponse
 from imbue.minds.desktop_client.api_models import SharingToggleResponse
 from imbue.minds.desktop_client.api_models import SshConnectionResponse
+from imbue.minds.desktop_client.api_models import WorkspaceBackupCheckResponse
 from imbue.minds.desktop_client.api_models import WorkspaceBackupsResponse
 from imbue.minds.desktop_client.api_models import WorkspaceLifecycleResponse
 from imbue.minds.desktop_client.api_models import WorkspaceListResponse
@@ -126,6 +128,7 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
     ("PATCH", "/api/v1/workspaces/{agent_id}"): _RouteModels(request_model=PatchWorkspaceRequest),
     ("GET", "/api/v1/workspaces/{agent_id}/version"): _RouteModels(response_model=WorkspaceVersionResponse),
     ("GET", "/api/v1/workspaces/{agent_id}/backups"): _RouteModels(response_model=WorkspaceBackupsResponse),
+    ("GET", "/api/v1/workspaces/{agent_id}/backup-check"): _RouteModels(response_model=WorkspaceBackupCheckResponse),
     ("POST", "/api/v1/workspaces/{agent_id}/backups/{snapshot_id}/restore"): _RouteModels(
         request_model=BackupRestoreRequest, response_model=OperationHandleResponse, success_status=202
     ),
@@ -175,6 +178,13 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
     ),
     ("GET", "/api/v1/workspaces/operations/backup/{operation_id}"): _RouteModels(
         response_model=BackupOperationStatusResponse
+    ),
+    ("POST", "/api/v1/workspaces/create-attempts/{create_attempt_id}/discard"): _RouteModels(
+        response_model=OperationHandleResponse, success_status=202
+    ),
+    ("DELETE", "/api/v1/workspaces/create-attempts/{create_attempt_id}"): _RouteModels(response_model=EmptyResponse),
+    ("GET", "/api/v1/workspaces/operations/create-attempt-discard/{operation_id}"): _RouteModels(
+        response_model=CreateAttemptDiscardStatusResponse
     ),
 }
 

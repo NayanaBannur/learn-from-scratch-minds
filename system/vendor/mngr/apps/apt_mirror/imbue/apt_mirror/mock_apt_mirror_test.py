@@ -2,8 +2,8 @@
 
 from pydantic import Field
 
-from imbue.remote_service_connector.apt_mirror import AptMirrorStorageInterface
-from imbue.remote_service_connector.apt_mirror import UpstreamFetcherInterface
+from imbue.apt_mirror.interfaces import AptMirrorStorageInterface
+from imbue.apt_mirror.interfaces import UpstreamFetcherInterface
 
 
 class InMemoryAptMirrorStorage(AptMirrorStorageInterface):

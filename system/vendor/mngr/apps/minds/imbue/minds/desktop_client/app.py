@@ -8,6 +8,7 @@ from collections.abc import Callable
 from collections.abc import Collection
 from collections.abc import Iterator
 from collections.abc import Mapping
+from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -48,9 +49,18 @@ from imbue.minds.desktop_client.auth import AuthStoreInterface
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backup_env_store import read_canonical_env
+from imbue.minds.desktop_client.backup_reaper import BACKUP_RETENTION_FALLBACK_SECONDS
+from imbue.minds.desktop_client.backup_reaper import ReapCandidate
+from imbue.minds.desktop_client.backup_reaper import bucket_owner_prefix_from_env
+from imbue.minds.desktop_client.backup_reaper import emails_by_bucket_owner_prefix
+from imbue.minds.desktop_client.backup_reaper import list_orphan_env_agent_ids
+from imbue.minds.desktop_client.backup_reaper import parse_destroyed_at
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
+from imbue.minds.desktop_client.create_attempt_rows import CreateAttemptRow
+from imbue.minds.desktop_client.create_attempt_rows import derive_create_attempt_rows
 from imbue.minds.desktop_client.dek_store import is_master_password_set_for_account
 from imbue.minds.desktop_client.dek_store import set_master_password_for_account
 from imbue.minds.desktop_client.destroying import DestroyingStatus
@@ -79,6 +89,8 @@ from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_ag
 from imbue.minds.desktop_client.mind_liveness import get_shutdown_capable_workspace_agent_ids
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
+from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KEY
@@ -108,6 +120,7 @@ from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.templates import RemoteWorkspaceTile
+from imbue.minds.desktop_client.templates import render_account_plan_modal_page
 from imbue.minds.desktop_client.templates import render_account_plan_section
 from imbue.minds.desktop_client.templates import render_accounts_modal_page
 from imbue.minds.desktop_client.templates import render_accounts_page
@@ -115,8 +128,11 @@ from imbue.minds.desktop_client.templates import render_ai_keys_page
 from imbue.minds.desktop_client.templates import render_auth_error_page
 from imbue.minds.desktop_client.templates import render_chrome_page
 from imbue.minds.desktop_client.templates import render_consent_page
+from imbue.minds.desktop_client.templates import render_create_attempt_record_page
 from imbue.minds.desktop_client.templates import render_create_form
 from imbue.minds.desktop_client.templates import render_creating_page
+from imbue.minds.desktop_client.templates import render_destroyed_workspaces_page
+from imbue.minds.desktop_client.templates import render_destroyed_workspaces_rows_fragment
 from imbue.minds.desktop_client.templates import render_destroying_page
 from imbue.minds.desktop_client.templates import render_dev_styleguide_page
 from imbue.minds.desktop_client.templates import render_help_page
@@ -128,6 +144,7 @@ from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
 from imbue.minds.desktop_client.templates import render_overlay_host_page
 from imbue.minds.desktop_client.templates import render_recovery_page
+from imbue.minds.desktop_client.templates import render_request_error_page
 from imbue.minds.desktop_client.templates import render_settings_modal_page
 from imbue.minds.desktop_client.templates import render_settings_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
@@ -141,6 +158,7 @@ from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
 from imbue.minds.desktop_client.workspace_create import default_region_for_provider_with_config
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
+from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_DESTROYED
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.desktop_client.workspace_record_store import is_cloud_provider_kind
@@ -151,7 +169,7 @@ from imbue.minds.mngr_settings.byok_accounts import list_cloud_account_providers
 from imbue.minds.mngr_settings.enablement import list_disabled_provider_names
 from imbue.minds.mngr_settings.imbue_cloud_accounts import is_imbue_cloud_provider_enabled_for_account
 from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_for_account
-from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import CreateAttemptId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
@@ -987,11 +1005,17 @@ def _handle_landing_page() -> Response:
     # splash.
     landing_resolver = get_state().backend_resolver
     onboarding_session_store = get_state().session_store
+    # CreateAttempt rows (creating / interrupted / failed) count as workspaces for
+    # every "does the user have anything?" decision below: a user mid-create
+    # must see the list with their creating row, not the welcome splash or the
+    # bare create form.
+    create_attempt_rows = _visible_create_attempt_rows(landing_resolver)
     if (
         not get_state().is_account_setup_skipped
         and onboarding_session_store is not None
         and landing_resolver.has_completed_initial_discovery()
         and not landing_resolver.list_active_workspace_ids()
+        and not create_attempt_rows
         and not onboarding_session_store.list_accounts()
         and not onboarding_session_store.is_last_identity_read_failed
     ):
@@ -1013,7 +1037,7 @@ def _handle_landing_page() -> Response:
     remote_workspaces = _collect_remote_workspace_tiles(backend_resolver, landing_session_store)
     locked_account_emails = _collect_locked_account_emails(landing_session_store)
 
-    if all_agent_ids or remote_workspaces:
+    if all_agent_ids or remote_workspaces or create_attempt_rows:
         agent_names: dict[str, str] = {}
         agent_accents: dict[str, str] = {}
         agent_providers: dict[str, str] = {}
@@ -1045,6 +1069,7 @@ def _handle_landing_page() -> Response:
             extra_account_count=launcher_extra_count,
             remote_workspaces=remote_workspaces,
             locked_account_emails=locked_account_emails,
+            create_attempt_rows=_create_attempt_row_views(create_attempt_rows),
         )
         return make_html_response(content=html)
 
@@ -1163,11 +1188,18 @@ def _build_region_form_context(
     return options_by_launch_mode, selected_by_launch_mode
 
 
-# -- Agent creation route handlers --
+# -- Agent create-attempt route handlers --
 
 
 def _handle_create_page() -> Response:
-    """Show the create form page (GET /create)."""
+    """Show the create form page (GET /create).
+
+    ``?retry=<create_attempt_id>`` pre-fills the form from an interrupted / failed
+    create attempt's pending record (the interrupted row's Retry action). Opening
+    the form is non-destructive: the dead create attempt's leftover host + record
+    are cleaned up only when the new create is actually submitted (the
+    implicit provider-scoped discard in the create flow).
+    """
     if not _is_request_authenticated():
         return make_response(status_code=403, content="Not authenticated")
 
@@ -1180,6 +1212,48 @@ def _handle_create_page() -> Response:
     accounts = session_store.list_accounts() if session_store else []
     default_account_id = minds_config.get_default_account_id() if minds_config else None
     region_options, region_selected = _build_region_form_context(minds_config, geo_cache)
+    cloud_accounts = list_cloud_account_providers(root=MindsRoot.from_environment())
+
+    retry_record = _retry_pending_create_attempt_record(request.args.get("retry", ""))
+    if retry_record is not None:
+        retry_request = retry_record.request
+        # Pre-select the record's region for its launch mode, when it has one.
+        if retry_request.region and retry_request.launch_mode.value in region_selected:
+            region_selected[retry_request.launch_mode.value] = retry_request.region
+        # Restore a bring-your-own-key account selection only when the account
+        # still exists; a since-deleted account silently falls back to the
+        # ordinary default (the POST handler would reject the ghost anyway).
+        retry_cloud_account = (
+            retry_request.cloud_account
+            if any(account.name == retry_request.cloud_account for account in cloud_accounts)
+            else ""
+        )
+        html = render_create_form(
+            git_url=retry_request.repo_source,
+            branch=retry_request.branch,
+            # The Name field carries the arbitrary display name; the slug is
+            # re-derived server-side on submit.
+            host_name=retry_request.display_name or retry_request.host_name,
+            launch_mode=retry_request.launch_mode,
+            docker_runtime=retry_request.docker_runtime,
+            backup_provider=retry_request.backup_provider,
+            backup_api_key_env=retry_request.backup_api_key_env,
+            accounts=accounts,
+            default_account_id=retry_request.account_id or default_account_id or "",
+            region_options_by_launch_mode=region_options,
+            region_selected_by_launch_mode=region_selected,
+            cloud_accounts=cloud_accounts,
+            byok_clouds_enabled=is_bring_your_own_cloud_enabled(),
+            # The pre-filled fields live in the advanced view.
+            start_advanced=True,
+            color=retry_request.color or _suggested_create_color(backend_resolver),
+            selected_cloud_account=retry_cloud_account,
+            # The form JS only honors a size its backend actually offers, so a
+            # stale stored value degrades to the default client-side.
+            selected_instance_type=retry_request.instance_type,
+        )
+        return make_html_response(content=html)
+
     html = render_create_form(
         git_url=git_url,
         branch=branch,
@@ -1187,7 +1261,7 @@ def _handle_create_page() -> Response:
         default_account_id=default_account_id or "",
         region_options_by_launch_mode=region_options,
         region_selected_by_launch_mode=region_selected,
-        cloud_accounts=list_cloud_account_providers(root=MindsRoot.from_environment()),
+        cloud_accounts=cloud_accounts,
         byok_clouds_enabled=is_bring_your_own_cloud_enabled(),
         # A deep-link that pre-fills a repo/branch wants those advanced fields
         # visible; otherwise start on the simple preset cards.
@@ -1197,6 +1271,22 @@ def _handle_create_page() -> Response:
     return make_html_response(content=html)
 
 
+def _retry_pending_create_attempt_record(retry_create_attempt_id: str) -> PendingCreateAttemptRecord | None:
+    """Load the pending record a ``/create?retry=<id>`` deep-link points at, if usable.
+
+    A DONE record is not retryable (its workspace exists); an unknown or
+    unreadable id just renders the ordinary blank form.
+    """
+    if not retry_create_attempt_id:
+        return None
+    agent_creator: AgentCreator | None = get_state().agent_creator
+    store = agent_creator.pending_create_attempt_store if agent_creator is not None else None
+    record = store.read_record(retry_create_attempt_id) if store is not None else None
+    if record is None or record.state is PendingCreateAttemptState.DONE:
+        return None
+    return record
+
+
 def _handle_creating_page(
     agent_id: str,
 ) -> Response:
@@ -1204,33 +1294,51 @@ def _handle_creating_page(
 
     The page shows the setting-up progress screen while the workspace is
     created in the background, then redirects into the workspace once
-    creation finishes. The page's JS polls the versioned operations resource
-    (``/api/v1/workspaces/operations/create/<creation_id>`` + ``/logs``) for status
-    and live logs, keyed by the same ``creation_id`` carried in the route.
+    create attempt finishes. The page's JS polls the versioned operations resource
+    (``/api/v1/workspaces/operations/create/<create_attempt_id>`` + ``/logs``) for status
+    and live logs, keyed by the same ``create_attempt_id`` carried in the route.
     """
     if not _is_request_authenticated():
         return make_response(status_code=403, content="Not authenticated")
 
     agent_creator: AgentCreator | None = get_state().agent_creator
     if agent_creator is None:
-        return make_response(status_code=501, content="Agent creation not configured")
+        return make_response(status_code=501, content="Agent create attempts are not configured")
 
-    # The ``agent_id`` route param is actually a ``CreationId`` (the
-    # minds-internal in-flight handle returned by ``start_creation``); the
+    # The ``agent_id`` route param is actually a ``CreateAttemptId`` (the
+    # minds-internal in-flight handle returned by ``start_create_attempt``); the
     # canonical mngr ``AgentId`` only exists once ``mngr create`` returns.
-    creation_id = CreationId(agent_id)
-    info = agent_creator.get_creation_info(creation_id)
+    create_attempt_id = CreateAttemptId(agent_id)
+    info = agent_creator.get_create_attempt_info(create_attempt_id)
     if info is None:
-        # The creation registry is in-memory, so a ``/creating/<id>`` window that
-        # outlives its creation -- reopened after an app restart, or after a
-        # failed creation was cleaned up -- finds no info here. This is a
-        # full-page navigation, so fall back to the landing page rather than
-        # stranding the window on a bare 404. (The status/onboarding/logs
-        # endpoints below keep returning 404 -- they are XHR/SSE callers, not
-        # navigations, and their JS handles the not-found case itself.)
-        return make_redirect_response(url="/", status_code=303)
+        # The create attempt registry is in-memory, so a ``/creating/<id>`` window
+        # that outlives its create attempt finds no info here. When a pending
+        # record survives, this page becomes the record-backed detail view:
+        # retry/discard for an interrupted create attempt, error/dismiss for a
+        # failed one. With no record either (dismissed, handed off, or a
+        # pre-record legacy id) fall back to the landing page rather than
+        # stranding a full-page navigation on a bare 404. (The status/logs
+        # endpoints keep returning 404 -- they are XHR/SSE callers whose JS
+        # handles the not-found case itself.)
+        store = agent_creator.pending_create_attempt_store
+        record = store.read_record(str(create_attempt_id)) if store is not None else None
+        if record is None or record.state is PendingCreateAttemptState.DONE:
+            # A DONE record means the workspace exists and is (about to be)
+            # in the list; home is where its row lives.
+            return make_redirect_response(url="/", status_code=303)
+        record_state = "failed" if record.state is PendingCreateAttemptState.FAILED else "interrupted"
+        html = render_create_attempt_record_page(
+            create_attempt_id=str(create_attempt_id),
+            workspace_name=record.request.display_name or record.request.host_name,
+            state=record_state,
+            error=record.error,
+            error_kind=record.error_kind,
+            log_tail=record.log_tail,
+            provider_label=friendly_provider_label(record.provider_instance_name or None),
+        )
+        return make_html_response(content=html)
 
-    html = render_creating_page(creation_id=creation_id, info=info)
+    html = render_creating_page(create_attempt_id=create_attempt_id, info=info)
     return make_html_response(content=html)
 
 
@@ -1351,7 +1459,11 @@ def _handle_chrome_page() -> Response:
 
     authenticated = _is_request_authenticated()
     backend_resolver = get_state().backend_resolver
-    initial_workspaces = _build_workspace_list(backend_resolver) if authenticated else []
+    initial_workspaces = (
+        _build_workspace_list(backend_resolver, create_attempt_rows=_visible_create_attempt_rows(backend_resolver))
+        if authenticated
+        else []
+    )
 
     # Optional server-side titlebar accent: the desktop shell appends
     # ?accent=%23rrggbb when it (re)loads the wrapper for a workspace whose
@@ -1413,7 +1525,7 @@ def _handle_chrome_sidebar() -> Response:
 def _handle_chrome_overlay() -> Response:
     """Serve the always-warm overlay host page loaded into the shared modal WebContentsView.
 
-    Loaded once at window creation (see createBundleOverlayView in electron/main.js) and
+    Loaded once at window create attempt (see createBundleOverlayView in electron/main.js) and
     kept mounted for the window's life. It hosts every overlay -- the migrated
     workspace menu / inbox / help / sign-in modals (as mount-on-demand iframes,
     created when opened and destroyed when closed) and hover tooltips -- as
@@ -1510,7 +1622,9 @@ def _handle_chrome_events() -> Response:
             # Send initial workspace list and request count
             session_store: MultiAccountSessionStore | None = get_state().session_store
             paths: WorkspacePaths | None = get_state().api_v1_paths
-            last_workspace_data = _build_workspace_list(backend_resolver, session_store)
+            last_workspace_data = _build_workspace_list(
+                backend_resolver, session_store, create_attempt_rows=_visible_create_attempt_rows(backend_resolver)
+            )
             last_destroying_ids = _destroying_agent_ids(paths, backend_resolver)
             last_remote_states = _build_remote_tile_states(backend_resolver, session_store)
             has_accounts = bool(session_store and session_store.list_accounts())
@@ -1661,7 +1775,9 @@ def _handle_chrome_events() -> Response:
                 # discovery host state + any optimistic override), so a liveness
                 # change makes ``current_data`` differ and pushes a ``workspaces``
                 # update below -- no separate liveness channel needed.
-                current_data = _build_workspace_list(backend_resolver, session_store)
+                current_data = _build_workspace_list(
+                    backend_resolver, session_store, create_attempt_rows=_visible_create_attempt_rows(backend_resolver)
+                )
                 current_destroying_ids = _destroying_agent_ids(paths, backend_resolver)
                 current_remote_states = _build_remote_tile_states(backend_resolver, session_store)
                 if (
@@ -1836,9 +1952,62 @@ def _destroying_agent_ids(paths: WorkspacePaths | None, backend_resolver: Backen
     return [str(agent_id) for agent_id, record in records.items() if record.status != DestroyingStatus.DONE]
 
 
+def _visible_create_attempt_rows(backend_resolver: BackendResolverInterface) -> list[CreateAttemptRow]:
+    """Derive the create attempt rows currently visible in the workspace list.
+
+    Merges the live in-memory create attempts with the persisted pending-create-attempt
+    records (interrupted / failed rows from previous sessions), dropping any
+    create attempt whose workspace a discovery snapshot has already confirmed --
+    the real workspace row takes over in place.
+    """
+    agent_creator: AgentCreator | None = get_state().agent_creator
+    if agent_creator is None:
+        return []
+    store = agent_creator.pending_create_attempt_store
+    records = store.list_records() if store is not None else []
+    known_agent_id_strs = frozenset(str(aid) for aid in backend_resolver.list_known_workspace_ids())
+    return derive_create_attempt_rows(agent_creator.list_create_attempt_infos(), records, known_agent_id_strs)
+
+
+def _create_attempt_row_views(create_attempt_rows: Sequence[CreateAttemptRow]) -> list[dict[str, str]]:
+    """Landing-page view dicts for the create attempt rows (server-rendered cards)."""
+    return [
+        {
+            "id": row.create_attempt_id,
+            "name": row.display_name,
+            "accent": row.color or DEFAULT_WORKSPACE_COLOR,
+            "state": row.kind.value.lower(),
+            "provider_label": friendly_provider_label(row.provider_instance_name or None),
+        }
+        for row in create_attempt_rows
+    ]
+
+
+def _create_attempt_row_entry(row: CreateAttemptRow) -> dict[str, str]:
+    """One create attempt row as a chrome-SSE ``workspaces`` entry.
+
+    ``id`` is the create attempt id (the row's stable identity until the workspace
+    row takes over); ``create_attempt_state`` is what the row builders badge on and
+    what routes a click to ``/creating/<id>`` instead of ``/goto/``.
+    """
+    entry: dict[str, str] = {
+        "id": row.create_attempt_id,
+        "name": row.display_name,
+        "accent": row.color or DEFAULT_WORKSPACE_COLOR,
+        "create_attempt_state": row.kind.value.lower(),
+    }
+    if row.account_email:
+        entry["account"] = row.account_email
+    return entry
+
+
 def _build_workspace_list(
     backend_resolver: BackendResolverInterface,
     session_store: MultiAccountSessionStore | None = None,
+    # In-flight / interrupted / failed create attempt rows to merge into the list
+    # (see ``_visible_create_attempt_rows``). A parameter -- not read from the app
+    # state here -- so this builder stays callable outside a request context.
+    create_attempt_rows: Sequence[CreateAttemptRow] | None = None,
 ) -> list[dict[str, str]]:
     """Build a JSON-serializable list of workspaces from the backend resolver.
 
@@ -1890,6 +2059,12 @@ def _build_workspace_list(
             if account is not None:
                 entry["account"] = account.email
         workspaces.append(entry)
+    # In-flight / interrupted / failed create attempts ride in the same list,
+    # badged via ``create_attempt_state``, so they sit inline with the finished
+    # workspaces (not in a separate section) and hand off to the real row
+    # in place once discovery confirms the workspace.
+    for create_attempt_row in create_attempt_rows or ():
+        workspaces.append(_create_attempt_row_entry(create_attempt_row))
     # Append workspaces known only from synced records (hosted on another
     # device). They render greyed and non-navigable; ``location`` names where
     # they live.
@@ -2168,6 +2343,27 @@ def _handle_account_plan_view(user_id: str) -> Response:
     return make_html_response(content=html)
 
 
+def _handle_account_plan_modal(user_id: str) -> Response:
+    """Render the per-account "Plan & Usage" modal shell (GET /accounts/<user_id>/plan-modal).
+
+    Opened by clicking an account card in the Manage Accounts modal. The shell
+    renders instantly and does NOT touch the connector; the modal then fills its
+    usage asynchronously from ``GET /accounts/<user_id>/plan-view`` (one account,
+    one connector query), so the overlay appears the moment the card is clicked.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    session_store: MultiAccountSessionStore | None = get_state().session_store
+    account = next(
+        (a for a in (session_store.list_accounts() if session_store else []) if str(a.user_id) == user_id),
+        None,
+    )
+    if account is None:
+        return make_response(status_code=404, content="Account not found")
+    html = render_account_plan_modal_page(acct_user_id=user_id, account_email=str(account.email))
+    return make_html_response(content=html)
+
+
 def _handle_account_trim_backups(user_id: str) -> Response:
     """Start the over-quota backup trim flow for one account (idempotent while running)."""
     if not _is_request_authenticated():
@@ -2213,6 +2409,190 @@ def _handle_account_set_plan(user_id: str) -> Response:
         # user-facing explanation -- surface it plainly.
         return _handle_accounts_page(plan_error=f"Could not switch {account.email} to '{plan}': {exc}")
     return make_response(status_code=303, headers={"Location": "/accounts"})
+
+
+def _signed_in_accounts_by_user_id() -> dict[str, str]:
+    """``user_id -> email`` for every signed-in account (empty when no session store)."""
+    session_store: MultiAccountSessionStore | None = get_state().session_store
+    if session_store is None:
+        return {}
+    return {str(account.user_id): str(account.email) for account in session_store.list_accounts()}
+
+
+def _destroyed_workspace_retention_days() -> int:
+    scheduler = get_state().sync_scheduler
+    reaper = scheduler.backup_reaper if scheduler is not None else None
+    retention_seconds = reaper.get_retention_seconds() if reaper is not None else BACKUP_RETENTION_FALLBACK_SECONDS
+    return max(1, round(retention_seconds / 86400.0))
+
+
+def _destroyed_workspace_retention_days_cached() -> int:
+    """Retention days from the reaper's cache, never fetching from the connector.
+
+    Used by the page shell so its first paint can't block on a (potentially
+    10-second) connector round-trip; the async rows path uses the fetching
+    :func:`_destroyed_workspace_retention_days` to refresh the cache.
+    """
+    scheduler = get_state().sync_scheduler
+    reaper = scheduler.backup_reaper if scheduler is not None else None
+    retention_seconds = (
+        reaper.get_cached_retention_seconds() if reaper is not None else BACKUP_RETENTION_FALLBACK_SECONDS
+    )
+    return max(1, round(retention_seconds / 86400.0))
+
+
+def _collect_destroyed_workspace_rows() -> list[dict[str, Any]]:
+    """Rows for the recently-destroyed page: tombstoned records (newest first), then orphan envs.
+
+    A row can download when its env is materialized locally (the sync pass
+    reconstructs envs from synced secrets for unlocked accounts, so a
+    still-encrypted row shows a locked hint instead).
+    """
+    state = get_state()
+    paths: WorkspacePaths | None = state.api_v1_paths
+    session_store: MultiAccountSessionStore | None = state.session_store
+    record_store = session_store.record_store if session_store is not None else None
+    if paths is None or record_store is None:
+        return []
+    accounts = _signed_in_accounts_by_user_id()
+    retention_seconds = _destroyed_workspace_retention_days() * 86400.0
+    now = datetime.now(timezone.utc)
+
+    # Tombstoned records for every signed-in account, newest destroyed first.
+    record_rows: list[dict[str, Any]] = []
+    for user_id, account_email in accounts.items():
+        for record in record_store.list_records(user_id):
+            if record.state != RECORD_STATE_DESTROYED:
+                continue
+            destroyed_at = parse_destroyed_at(record.destroyed_at)
+            has_env = read_canonical_env(paths, AgentId(record.agent_id)) is not None
+            has_secrets = record.encrypted_secrets is not None
+            days_left: int | None = None
+            if destroyed_at is not None:
+                days_left = max(0, round((retention_seconds - (now - destroyed_at).total_seconds()) / 86400.0))
+            record_rows.append(
+                {
+                    "agent_id": record.agent_id,
+                    "host_id": record.host_id,
+                    "user_id": user_id,
+                    "account_email": account_email,
+                    "display_name": record.display_name or record.agent_id,
+                    "account_label": account_email,
+                    "destroyed_at": destroyed_at,
+                    "destroyed_at_display": destroyed_at.strftime("%Y-%m-%d") if destroyed_at is not None else "",
+                    "days_left_display": (
+                        ""
+                        if days_left is None
+                        else ("deleting soon" if days_left <= 0 else f"{days_left} day(s) until deletion")
+                    ),
+                    "has_backup": has_env or has_secrets,
+                    "can_download": has_env,
+                    "is_locked": (not has_env) and has_secrets,
+                    "can_delete": True,
+                    "delete_hint": "",
+                }
+            )
+    record_rows.sort(key=lambda row: row["destroyed_at"] if row["destroyed_at"] is not None else now, reverse=True)
+
+    # Orphan envs this device holds with no record at all, newest file first.
+    email_by_prefix = emails_by_bucket_owner_prefix(accounts)
+    orphan_rows: list[dict[str, Any]] = []
+    for agent_id in reversed(list_orphan_env_agent_ids(paths, record_store)):
+        env_content = read_canonical_env(paths, agent_id)
+        owner_prefix = bucket_owner_prefix_from_env(env_content) if env_content is not None else None
+        owner_email = email_by_prefix.get(owner_prefix) if owner_prefix is not None else None
+        is_owner_signed_in = owner_email is not None or owner_prefix is None
+        orphan_rows.append(
+            {
+                "agent_id": str(agent_id),
+                "host_id": "",
+                "user_id": "",
+                "account_email": owner_email or "",
+                "display_name": f"unknown workspace ({agent_id})",
+                "account_label": "this device",
+                "destroyed_at": None,
+                "destroyed_at_display": "",
+                # Only imbue_cloud (R2) orphans are ever cleaned automatically;
+                # BYO envs stay until the user deletes them here.
+                "days_left_display": (
+                    "scheduled for cleanup" if owner_prefix is not None else "kept until you delete it"
+                ),
+                "has_backup": True,
+                "can_download": True,
+                "is_locked": False,
+                "can_delete": is_owner_signed_in,
+                "delete_hint": "" if is_owner_signed_in else "Sign in as the owning account to delete.",
+            }
+        )
+    return record_rows + orphan_rows
+
+
+def _handle_destroyed_workspaces_page(error: str | None = None) -> Response:
+    """Render the recently-destroyed workspaces page shell (GET /workspaces/destroyed).
+
+    The shell paints instantly; the slow row collection happens in
+    ``GET /workspaces/destroyed/rows``, which the shell's script fetches.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    html = render_destroyed_workspaces_page(
+        retention_days=_destroyed_workspace_retention_days_cached(),
+        error=error or "",
+    )
+    return make_html_response(content=html)
+
+
+def _handle_destroyed_workspaces_rows() -> Response:
+    """Render the recently-destroyed row list fragment (GET /workspaces/destroyed/rows).
+
+    Collecting the rows queries the record store and inspects local envs, so it
+    runs here (fetched asynchronously by the page shell) rather than blocking
+    the page's first paint.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    html = render_destroyed_workspaces_rows_fragment(rows=_collect_destroyed_workspace_rows())
+    return make_html_response(content=html)
+
+
+def _handle_destroyed_workspace_delete_backup(agent_id: str) -> Response:
+    """Delete one destroyed workspace's backup now (POST /workspaces/destroyed/<agent_id>/delete-backup).
+
+    Frees quota before the retention window expires: the same strict
+    bucket-record-env deletion the reaper performs, just on user request. On
+    failure the page re-renders with the error rather than losing the row.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    scheduler = get_state().sync_scheduler
+    reaper = scheduler.backup_reaper if scheduler is not None else None
+    if reaper is None:
+        return _handle_destroyed_workspaces_page(error="Backup management is not configured on this install.")
+    accounts = _signed_in_accounts_by_user_id()
+    row = next(
+        (entry for entry in _collect_destroyed_workspace_rows() if entry["agent_id"] == agent_id),
+        None,
+    )
+    if row is None:
+        return _handle_destroyed_workspaces_page(error=f"No destroyed workspace found for {agent_id}.")
+    if row["user_id"]:
+        destroyed_at = row["destroyed_at"] if row["destroyed_at"] is not None else datetime.now(timezone.utc)
+        candidate = ReapCandidate(
+            user_id=row["user_id"],
+            account_email=row["account_email"],
+            agent_id=row["agent_id"],
+            host_id=row["host_id"],
+            display_name=row["display_name"],
+            destroyed_at=destroyed_at,
+        )
+        is_reaped = reaper.reap_candidate(candidate, reason="user_requested")
+    else:
+        is_reaped = reaper.delete_orphan_backup_now(AgentId(agent_id), accounts)
+    if not is_reaped:
+        return _handle_destroyed_workspaces_page(
+            error=f"Could not delete the backup for {row['display_name']}; see the logs and try again."
+        )
+    return make_response(status_code=303, headers={"Location": "/workspaces/destroyed"})
 
 
 def _find_predefined_permission_handler() -> LatchkeyPermissionGrantHandler | None:
@@ -3261,6 +3641,28 @@ def create_desktop_client(
         # own status instead of collapsing them into a 500 -- matching the prior
         # FastAPI/Starlette behavior where the catch-all only handled real 500s.
         if isinstance(exc, HTTPException):
+            # A routing-level 404/405 reached by a real page NAVIGATION would
+            # paint werkzeug's bare error page -- no chrome, no links --
+            # stranding the user (e.g. a link that points at a POST-only
+            # route, which session restore then faithfully re-opens). Serve a
+            # friendly page with a way home instead. Navigation is detected
+            # from the request, not the path: even an /api/ URL strands the
+            # user when opened as a document, while fetch()/XHR callers (who
+            # read resp.ok, not the body) keep the raw status. Chromium always
+            # sends Sec-Fetch-Dest; the Accept sniff is the fallback for
+            # clients that don't (fetches default to Accept: */*).
+            sec_fetch_dest = request.headers.get("Sec-Fetch-Dest", "")
+            is_document_navigation = (
+                sec_fetch_dest == "document" if sec_fetch_dest else "text/html" in request.headers.get("Accept", "")
+            )
+            if exc.code in (404, 405) and is_document_navigation:
+                if exc.code == 404:
+                    title, message = "Page not found", "This page doesn't exist (it may have moved)."
+                else:
+                    title, message = "That didn't work", "This link can't be opened as a page."
+                return make_html_response(
+                    content=render_request_error_page(title=title, message=message), status_code=exc.code
+                )
             return exc
         logger.opt(exception=exc).error("Unhandled exception on {} {}", request.method, request.path)
         return make_response(status_code=500, content=f"Internal Server Error: {exc}")
@@ -3350,6 +3752,13 @@ def create_desktop_client(
     # Account management routes
     app.add_url_rule("/accounts", view_func=_handle_accounts_page)
     app.add_url_rule("/accounts/modal", view_func=_handle_accounts_modal)
+    app.add_url_rule("/workspaces/destroyed", view_func=_handle_destroyed_workspaces_page)
+    app.add_url_rule("/workspaces/destroyed/rows", view_func=_handle_destroyed_workspaces_rows)
+    app.add_url_rule(
+        "/workspaces/destroyed/<agent_id>/delete-backup",
+        view_func=_handle_destroyed_workspace_delete_backup,
+        methods=["POST"],
+    )
     app.add_url_rule("/settings", view_func=_handle_settings_page)
     app.add_url_rule("/settings/ai-keys", view_func=_handle_ai_keys_page)
     app.add_url_rule("/settings/ai-keys/mint", view_func=_handle_mint_ai_key, methods=["POST"])
@@ -3385,6 +3794,7 @@ def create_desktop_client(
     )
     app.add_url_rule("/accounts/set-default", view_func=_handle_set_default_account, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/plan-view", view_func=_handle_account_plan_view)
+    app.add_url_rule("/accounts/<user_id>/plan-modal", view_func=_handle_account_plan_modal)
     app.add_url_rule("/accounts/<user_id>/plan", view_func=_handle_account_set_plan, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/trim-backups", view_func=_handle_account_trim_backups, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/logout", view_func=_handle_account_logout, methods=["POST"])
@@ -3410,7 +3820,7 @@ def create_desktop_client(
     app.add_url_rule("/sharing/<agent_id>/<service_name>", view_func=_handle_sharing_page)
     app.add_url_rule("/sharing/<agent_id>/<service_name>/modal", view_func=_handle_sharing_modal)
 
-    # Agent creation routes. The create form now submits to POST
+    # Agent create-attempt routes. The create form now submits to POST
     # /api/v1/workspaces and /creating/<id> polls the v1 operations resource, so
     # only the GET create-form page and the /creating/<id> progress page remain
     # here; status/logs and the form POST moved to the versioned surface.

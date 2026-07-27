@@ -73,14 +73,14 @@ class OperationHandleResponse(FrozenModel):
 class CreateOperationStatusResponse(FrozenModel):
     """Status of a create operation (polled at /operations/create/<id>)."""
 
-    operation_id: str = Field(description="The creation id being polled")
+    operation_id: str = Field(description="The create attempt id being polled")
     kind: str = Field(description="Always 'create'")
-    status: str = Field(description="Raw creation status")
+    status: str = Field(description="Raw create attempt status")
     status_text: str = Field(description="Human-readable, mode-aware stage caption for the creating page")
-    is_done: bool = Field(description="Whether creation has finished successfully")
+    is_done: bool = Field(description="Whether the create attempt has finished successfully")
     agent_id: str | None = Field(default=None, description="The created workspace agent id, once known")
     redirect_url: str | None = Field(default=None, description="Absolute /goto/<agent>/ URL to navigate to when done")
-    error: str | None = Field(default=None, description="Failure message, when the creation failed")
+    error: str | None = Field(default=None, description="Failure message, when the create attempt failed")
     error_kind: str | None = Field(
         default=None,
         description=(
@@ -98,6 +98,15 @@ class DestroyOperationStatusResponse(FrozenModel):
     status: str = Field(description="Raw destroy status")
     is_done: bool = Field(description="Whether the host is fully gone")
     agent_id: str = Field(description="The workspace agent id (same as operation_id)")
+
+
+class CreateAttemptDiscardStatusResponse(FrozenModel):
+    """Status of a create attempt discard (polled at /operations/create-attempt-discard/<id>)."""
+
+    operation_id: str = Field(description="The create attempt id being discarded")
+    kind: str = Field(description="Always 'create_attempt_discard'")
+    status: str = Field(description="Raw discard status: RUNNING / DONE / FAILED")
+    is_done: bool = Field(description="Whether the discard finished and the pending record was removed")
 
 
 class RestartOperationStatusResponse(FrozenModel):
@@ -409,7 +418,7 @@ class WorkspaceSummary(FrozenModel):
     )
     account_email: str | None = Field(default=None, description="Email of the associated signed-in account, when any")
     provider_name: str | None = Field(default=None, description="Provider backend name")
-    create_time: str | None = Field(default=None, description="Creation time (UTC ISO 8601)")
+    create_time: str | None = Field(default=None, description="Create time (UTC ISO 8601)")
     original_minds_version: str | None = Field(default=None, description="Immutable create-time minds version label")
     color: str | None = Field(default=None, description="Workspace tile color")
 
@@ -463,7 +472,7 @@ class WorkspaceVersionResponse(FrozenModel):
     original_minds_version: str | None = Field(default=None, description="Immutable create-time minds version label")
     current_minds_version: str | None = Field(default=None, description="Current minds version from the workspace git")
     upgrade_merges: tuple[UpgradeMergeSummary, ...] = Field(
-        default=(), description="Upgrade merges applied since creation (best-effort)"
+        default=(), description="Upgrade merges applied since the workspace was created (best-effort)"
     )
 
 
@@ -480,13 +489,14 @@ class BackupSnapshotSummary(FrozenModel):
 
 
 class WorkspaceBackupsResponse(FrozenModel):
-    """A workspace's full backup picture: snapshots plus the backup-service verification result.
+    """A workspace's snapshot picture: the restic listing plus the live backing-up flag.
 
-    The snapshot half (restic, run from the minds machine) works even when
-    the workspace is offline or destroyed; the verification half execs into
-    the workspace and reports OFFLINE/DISABLED instead when it cannot or
-    must not run. Cross-workspace parallelism is the caller's job -- this is
-    deliberately the only backup-health surface, one workspace per request.
+    Served from the minds machine's restic access alone, so it works (and
+    stays fast) even when the workspace is offline or destroyed. The slow
+    exec-based service verification lives on the separate ``backup-check``
+    route so this response never waits on an exec into the workspace.
+    Cross-workspace parallelism is the caller's job -- one workspace per
+    request.
     """
 
     agent_id: str = Field(description="The workspace agent id")
@@ -502,6 +512,19 @@ class WorkspaceBackupsResponse(FrozenModel):
     snapshots_error: str | None = Field(
         default=None, description="Why the snapshot listing failed (e.g. restic error), when it did"
     )
+
+
+class WorkspaceBackupCheckResponse(FrozenModel):
+    """The backup-service verification verdict for one workspace.
+
+    The check execs into the workspace (slow: it spawns mngr and runs a
+    script inside the container), which is why it is a separate route from
+    the fast snapshot listing. Staleness (configured but no recent snapshot
+    while the workspace has been up long enough to have produced one) is
+    folded into ``problems``.
+    """
+
+    agent_id: str = Field(description="The workspace agent id")
     check_state: str = Field(description="Verification verdict: OK/PROBLEMS/OFFLINE/DISABLED/UNKNOWN")
     problems: tuple[str, ...] = Field(default=(), description="Detected backup-service problems (badge causes)")
     installed_version: str | None = Field(default=None, description="Installed backup-code version, when known")

@@ -1,4 +1,4 @@
-{#def agent_ids, agent_accents, mngr_forward_origin, is_discovering, agent_names, destroying_status_by_agent_id, shutdown_capable_agent_ids, mind_liveness_by_agent_id, agent_providers={}, account_email="", extra_account_count=0, remote_workspaces=[], locked_account_emails=[] #}
+{#def agent_ids, agent_accents, mngr_forward_origin, is_discovering, agent_names, destroying_status_by_agent_id, shutdown_capable_agent_ids, mind_liveness_by_agent_id, agent_providers={}, account_email="", extra_account_count=0, remote_workspaces=[], locked_account_emails=[], create_attempt_rows=[] #}
 {#
   Landing page: list of accessible workspaces with per-row health and backup
   status. Subscribes to the chrome SSE so the page reloads
@@ -29,6 +29,18 @@
       if (separatorIdx < 0) return;
       renderedRemoteStates[pair.slice(0, separatorIdx)] = pair.slice(separatorIdx + 1);
     });
+    // CreateAttempt rows as rendered ("createAttemptId=state" pairs). The SSE workspaces
+    // entries carry the live states (create_attempt_state on each create attempt entry);
+    // a state flip (creating -> failed, interrupted discarded, ...) reloads so
+    // the badge re-renders. Add/remove is covered by the id diff below, since
+    // create attempt ids ride in the same rendered-ids list.
+    var renderedCreateAttemptStates = {};
+    (rendered.landingCreateAttemptStates || '').split(',').forEach(function (pair) {
+      if (!pair) return;
+      var separatorIdx = pair.indexOf('=');
+      if (separatorIdx < 0) return;
+      renderedCreateAttemptStates[pair.slice(0, separatorIdx)] = pair.slice(separatorIdx + 1);
+    });
 
     var healthStatusByAgent = {};
 
@@ -44,8 +56,12 @@
     // authoritative state reaches the target or the action fails.
     var pendingMindActionByAgent = {};
 
+    function agentRowSelector(agentId) {
+      return '[data-agent-id="' + (window.CSS && CSS.escape ? CSS.escape(agentId) : agentId) + '"]';
+    }
+
     function getRow(agentId) {
-      return document.querySelector('[data-agent-id="' + (window.CSS && CSS.escape ? CSS.escape(agentId) : agentId) + '"]');
+      return document.querySelector(agentRowSelector(agentId));
     }
 
     function applyRowHealth(agentId, status) {
@@ -510,18 +526,28 @@
     var BACKUP_RECENT_CREATE_MS = 75 * 60 * 1000;
     var BACKUP_CHECKING_TEXT = 'Checking backups…';
 
+    // The last badge status applied per workspace, so a later backup-health
+    // verdict (staleness arrives from the slow check, well after the badge
+    // painted) can re-render the badge with the right tone.
+    var lastBackupStatusByAgentId = {};
+
+    function isWorkspaceBackupStale(agentId) {
+      if (!window.mindsBackupHealth || !window.mindsBackupHealth.getProblems) return false;
+      return window.mindsBackupHealth.getProblems(agentId).indexOf('BACKUPS_STALE') !== -1;
+    }
+
     function applyBackupBadge(agentId, status) {
-      var row = getRow(agentId);
-      if (!row) return;
-      var badge = row.querySelector('.landing-backup-badge');
-      if (!badge) return;
+      lastBackupStatusByAgentId[agentId] = status;
       var state = status && status.state;
       var text = '';
       var tone = 'bg-fill-subtle text-secondary';
       if (state === 'BACKING_UP') {
         text = 'Backing up…'; tone = 'bg-accent/15 text-accent';
       } else if (state === 'BACKED_UP') {
-        text = 'Backed up ' + relativeAgo(status.last_success_at); tone = 'bg-success/15 text-success';
+        text = 'Backed up ' + relativeAgo(status.last_success_at);
+        // Green means "recently backed up": once the service check reports
+        // the history stale, the same label re-tones to a warning.
+        tone = isWorkspaceBackupStale(agentId) ? 'bg-warning/15 text-warning' : 'bg-success/15 text-success';
       } else if (state === 'NEVER') {
         text = 'Backup pending'; tone = 'bg-warning/15 text-warning';
       } else if (state === 'UNKNOWN') {
@@ -534,12 +560,20 @@
           text = 'No backups'; tone = 'bg-fill-subtle text-secondary';
         }
       }
-      badge.textContent = text;
-      badge.className = BACKUP_BADGE_BASE + tone;
-      // Show via inline display, clearing any `display:none` a prior
-      // clearBackupChecking set (a `.hidden` class can't hide this inline-flex
-      // pill, so we drive visibility through style.display).
-      badge.style.display = '';
+      // Apply to EVERY row carrying this agent id, not just the first match:
+      // discovery churn can transiently render the same workspace both as a
+      // local tile and as a synced-record row, and updating only the first
+      // would strand the duplicate on "Checking…".
+      document.querySelectorAll(agentRowSelector(agentId)).forEach(function (row) {
+        var badge = row.querySelector('.landing-backup-badge');
+        if (!badge) return;
+        badge.textContent = text;
+        badge.className = BACKUP_BADGE_BASE + tone;
+        // Show via inline display, clearing the server-rendered `display:none`
+        // (a `.hidden` class can't hide this inline-flex pill, so visibility
+        // is driven through style.display).
+        badge.style.display = '';
+      });
     }
 
     function showBackupChecking() {
@@ -550,14 +584,15 @@
       });
     }
 
-    function clearBackupChecking() {
+    function resolveUnfinishedBackupChecks() {
+      // The stream finished (or failed): any badge still on "Checking…" never
+      // had its line applied. Resolve it to a neutral "unknown" -- never hide
+      // it, since a blank badge reads as missing data with no explanation.
       document.querySelectorAll('.landing-backup-badge').forEach(function (badge) {
         if (badge.textContent === BACKUP_CHECKING_TEXT) {
-          badge.textContent = '';
-          badge.className = 'landing-backup-badge inline-flex items-center px-2 py-0.5 rounded-md type-label';
-          // Hide via inline display, not a `.hidden` class (the base class is
-          // inline-flex, which beats `.hidden` in the cascade).
-          badge.style.display = 'none';
+          badge.textContent = 'Backup status unknown';
+          badge.className = BACKUP_BADGE_BASE + 'bg-fill-subtle text-secondary';
+          badge.style.display = '';
         }
       });
     }
@@ -568,7 +603,7 @@
     // map "has snapshots" -> BACKED_UP (last_success = newest snapshot's time)
     // and "no snapshots" -> the create-time fallback ("Created N ago" / "No
     // backups"). This keeps applyBackupBadge's visual output equivalent.
-    function deriveBackupStatus(snapshots, createTime, isBackingUp) {
+    function deriveBackupStatus(snapshots, createTime, isBackingUp, error) {
       var latestTime = null;
       if (snapshots && snapshots.length > 0) {
         var latest = snapshots.reduce(function (a, b) {
@@ -585,41 +620,105 @@
       if (latestTime) {
         return { state: 'BACKED_UP', last_success_at: latestTime };
       }
+      // A failed/timed-out probe is "unknown", not "No backups" -- the
+      // workspace may well have backups the probe just couldn't list.
+      if (error) {
+        return { state: 'UNKNOWN' };
+      }
       return { created_at: createTime || null };
     }
 
+    // Backup badges load over ONE streaming request instead of a fetch per
+    // workspace: the old fan-out opened N connections at once, saturating
+    // Chromium's six-per-origin pool so the next navigation queued behind it.
+    // The server streams one NDJSON line per workspace as each restic probe
+    // resolves (fast ones paint immediately, a slow one never blocks the rest),
+    // and each line carries the create_time for the no-backups fallback. The
+    // request is aborted on navigation so it never holds a connection open.
+    var backupAbortController = null;
     function loadBackupStatus() {
-      if (renderedIds.length === 0) return;
+      // renderedIds also carries create-attempt row ids (for the SSE
+      // drift-detection reload); those rows have no backup badge and their
+      // ids are not agent ids -- one of them in the batch would 400 the
+      // whole request and flip every badge to "Backup status unknown".
+      var backupAgentIds = renderedIds.filter(function (id) {
+        return id.indexOf('agent-') === 0;
+      });
+      if (backupAgentIds.length === 0) return;
       showBackupChecking();
-      // The workspaces list carries each row's create_time for the no-backups
-      // "Created N ago" fallback; fetch it once, then fan out one backups
-      // request per workspace (replacing the old single batch route).
-      fetch('/api/v1/workspaces').then(function (response) {
-        return response.ok ? response.json() : { workspaces: [] };
-      }).catch(function () { return { workspaces: [] }; }).then(function (wsData) {
-        var createTimeByAgent = {};
-        ((wsData && wsData.workspaces) || []).forEach(function (w) {
-          var id = w && (w.agent_id || w.id);
-          if (id) createTimeByAgent[id] = w.create_time || w.created_at;
-        });
-        var pending = renderedIds.length;
-        function finishOne() {
-          pending -= 1;
-          if (pending <= 0) clearBackupChecking();
+      if (backupAbortController) backupAbortController.abort();
+      backupAbortController = new AbortController();
+      var url = '/api/v1/workspaces/backups?' + backupAgentIds.map(function (id) {
+        return 'agent_id=' + encodeURIComponent(id);
+      }).join('&');
+      fetch(url, { signal: backupAbortController.signal }).then(function (response) {
+        if (!response.ok || !response.body) { resolveUnfinishedBackupChecks(); return; }
+        var reader = response.body.getReader();
+        var decoder = new TextDecoder();
+        var buffer = '';
+        function pump() {
+          return reader.read().then(function (result) {
+            if (result.done) { resolveUnfinishedBackupChecks(); return; }
+            buffer += decoder.decode(result.value, { stream: true });
+            var lines = buffer.split('\n');
+            // Keep the trailing partial line (if any) for the next chunk.
+            buffer = lines.pop();
+            lines.forEach(function (line) {
+              if (!line) return;
+              var data;
+              try { data = JSON.parse(line); } catch (e) { return; }
+              applyBackupBadge(
+                data.agent_id,
+                deriveBackupStatus(data.snapshots, data.created_at, data.is_backing_up, data.error)
+              );
+            });
+            return pump();
+          });
         }
-        renderedIds.forEach(function (agentId) {
-          fetch('/api/v1/workspaces/' + encodeURIComponent(agentId) + '/backups?limit=1').then(function (response) {
-            return response.ok ? response.json() : null;
-          }).catch(function () { return null; }).then(function (data) {
-            var snapshots = (data && data.snapshots) || [];
-            applyBackupBadge(agentId, deriveBackupStatus(snapshots, createTimeByAgent[agentId], data && data.is_backing_up));
-          }).catch(function (err) {
-            console.error('Backup status fetch failed for', agentId, err);
-          }).then(finishOne);
-        });
+        return pump();
+      }).catch(function (err) {
+        if (err && err.name === 'AbortError') return;  // navigated away mid-stream; fine
+        resolveUnfinishedBackupChecks();
       });
     }
     loadBackupStatus();
+
+    // Backup-service warnings (ENV_MISMATCH, BACKUPS_STALE, ...) come from the
+    // shared backup-health cache (backup_health.js, loaded by the chrome
+    // shell): show the same warning dot the sidebar rows use, and re-render
+    // the badge so a stale "Backed up N ago" re-tones to a warning.
+    function applyBackupWarningIndicators() {
+      if (pageTornDown || !window.mindsBackupHealth) return;
+      renderedIds.forEach(function (agentId) {
+        var warningText = window.mindsBackupHealth.get(agentId);
+        document.querySelectorAll(agentRowSelector(agentId)).forEach(function (row) {
+          var dot = row.querySelector('.landing-backup-warning-dot');
+          if (!dot) return;
+          dot.style.display = warningText ? '' : 'none';
+          dot.title = warningText || '';
+        });
+        if (lastBackupStatusByAgentId[agentId]) {
+          applyBackupBadge(agentId, lastBackupStatusByAgentId[agentId]);
+        }
+      });
+    }
+    // This inline page script runs before the shell's deferred scripts on a
+    // full load, so the cache may not exist yet; poll briefly until it does.
+    // The cache outlives in-place page swaps, so keep the unsubscribe handle
+    // and detach on teardown -- otherwise every landing visit would leave a
+    // dead listener (and this page's whole closure) behind forever.
+    var backupHealthSubscribeTimer = null;
+    var backupHealthUnsubscribe = null;
+    function subscribeToBackupHealth() {
+      if (pageTornDown) return;
+      if (!window.mindsBackupHealth) {
+        backupHealthSubscribeTimer = setTimeout(subscribeToBackupHealth, 250);
+        return;
+      }
+      backupHealthUnsubscribe = window.mindsBackupHealth.onUpdate(applyBackupWarningIndicators);
+      applyBackupWarningIndicators();
+    }
+    subscribeToBackupHealth();
 
     var es = null;
     // Set when the chrome shell swaps this page out in place (no document
@@ -629,6 +728,11 @@
     var pageTornDown = false;
     window.addEventListener('minds:page-teardown', function () {
       pageTornDown = true;
+      // Abort the in-flight backup-status stream so navigating away frees its
+      // connection immediately (the whole point of the streaming endpoint).
+      if (backupAbortController) backupAbortController.abort();
+      if (backupHealthSubscribeTimer) clearTimeout(backupHealthSubscribeTimer);
+      if (backupHealthUnsubscribe) backupHealthUnsubscribe();
       if (es) {
         es.close();
         es = null;
@@ -694,6 +798,22 @@
             window.dispatchEvent(new Event('minds:refresh-local-page'));
             return;
           }
+        }
+        // CreateAttempt-row state flips (creating -> failed, ...) change no ids,
+        // so diff the per-create-attempt states carried on the workspaces entries.
+        var liveCreateAttemptStates = {};
+        data.workspaces.forEach(function (w) {
+          if (w.create_attempt_state) liveCreateAttemptStates[w.id] = w.create_attempt_state;
+        });
+        var createAttemptDiffers = Object.keys(renderedCreateAttemptStates).some(function (id) {
+          return liveCreateAttemptStates[id] !== renderedCreateAttemptStates[id];
+        }) || Object.keys(liveCreateAttemptStates).some(function (id) {
+          return !(id in renderedCreateAttemptStates);
+        });
+        if (createAttemptDiffers) {
+          es.close();
+          window.dispatchEvent(new Event('minds:refresh-local-page'));
+          return;
         }
         // Same set of rows: apply each shutdown-capable mind's liveness in place
         // (it rides the workspace entry now, not a separate event).
@@ -772,8 +892,8 @@
 {% endset %}
 <ChromeShell title="Workspaces" scripts={{ _scripts }}>
   <PageContainer>
-    {% if agent_ids or remote_workspaces %}
-      <div class="flex items-center justify-between mb-4" data-landing-agent-ids="{{ ((agent_ids | map('string') | list) + (remote_workspaces | map(attribute='agent_id') | list)) | join(',') }}" data-landing-remote-states="{% for remote in remote_workspaces %}{{ remote.agent_id }}={{ remote.state }}{% if not loop.last %},{% endif %}{% endfor %}">
+    {% if agent_ids or remote_workspaces or create_attempt_rows %}
+      <div class="flex items-center justify-between mb-4" data-landing-agent-ids="{{ ((agent_ids | map('string') | list) + (create_attempt_rows | map(attribute='id') | list) + (remote_workspaces | map(attribute='agent_id') | list)) | join(',') }}" data-landing-remote-states="{% for remote in remote_workspaces %}{{ remote.agent_id }}={{ remote.state }}{% if not loop.last %},{% endif %}{% endfor %}" data-landing-create-attempt-states="{% for create_attempt in create_attempt_rows %}{{ create_attempt.id }}={{ create_attempt.state }}{% if not loop.last %},{% endif %}{% endfor %}">
         <h1 class="type-heading text-primary">Workspaces</h1>
         <ButtonLink href="/create" variant="primary">Create</ButtonLink>
       </div>
@@ -844,6 +964,9 @@
               {% if provider_label %}
                 <span class="landing-provider-badge inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-secondary">{{ provider_label }}</span>
               {% endif %}
+              {# Backup-service warning dot (same affordance as sidebar rows),
+                 shown by the backup-health cache; the tooltip carries the cause. #}
+              <span class="landing-backup-warning-dot inline-block w-1.5 h-1.5 rounded-full bg-warning shrink-0" style="display:none"></span>
               <span class="landing-backup-badge inline-flex items-center px-2 py-0.5 rounded-md type-label" style="display:none"></span>
               <span class="landing-mind-state-badge inline-flex items-center px-2 py-0.5 rounded-md type-label" style="display:none"></span>
               <span class="landing-health-badge inline-flex items-center px-2 py-0.5 rounded-md type-label" style="display:none"></span>
@@ -893,6 +1016,35 @@
           {% endif %}
         {% endfor %}
 
+        {# In-flight / interrupted / failed create attempts, inline with the
+           workspace rows. Each links to the create attempt detail page at
+           /creating/<id> -- the live progress view for a creating row, the
+           retry/discard view for an interrupted one, and the error/dismiss
+           view for a failed one. #}
+        {% for create_attempt in create_attempt_rows %}
+          {% set create_attempt_accent_style = "--workspace-accent: " ~ create_attempt.accent ~ ";" %}
+          {% set create_attempt_href = "/creating/" ~ create_attempt.id %}
+          <Card tag="a" layout="row" interactive
+                extra="accent-spine relative overflow-hidden"
+                :href="create_attempt_href"
+                :style="create_attempt_accent_style">
+            <span class="flex-1 font-semibold text-secondary pl-1">{{ create_attempt.name }}</span>
+            {% if create_attempt.provider_label %}
+              <span class="landing-provider-badge inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-secondary">{{ create_attempt.provider_label }}</span>
+            {% endif %}
+            {% if create_attempt.state == 'creating' %}
+              <StatusBadge extra="gap-2">
+                <Spinner size="sm" />
+                Creating…
+              </StatusBadge>
+            {% elif create_attempt.state == 'interrupted' %}
+              <StatusBadge variant="warn">Interrupted</StatusBadge>
+            {% else %}
+              <StatusBadge variant="error">Create failed</StatusBadge>
+            {% endif %}
+          </Card>
+        {% endfor %}
+
         {# Workspaces known only from synced records (hosted on another device,
            or otherwise not in local discovery). Greyed and non-clickable --
            their hosts aren't reachable from here -- but backup status still
@@ -917,6 +1069,7 @@
             {% elif remote.state == 'error' %}
               <span class="inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-important" data-tooltip="{{ remote.state_detail or 'Could not apply the synced access material.' }}">sync error</span>
             {% endif %}
+            <span class="landing-backup-warning-dot inline-block w-1.5 h-1.5 rounded-full bg-warning shrink-0" style="display:none"></span>
             <span class="landing-backup-badge inline-flex items-center px-2 py-0.5 rounded-md type-label" style="display:none"></span>
             <Button variant="ghost" size="icon"
                     onclick="window.landingRemoveRecord(event, this)"
@@ -952,6 +1105,16 @@
         </div>
       {% endif %}
     {% endif %}
+
+    {# Link to the recently-destroyed workspaces page. Sits just below the
+       workspace list (and above the collapsed providers panel) -- where you
+       look when hunting for the backup of a workspace you just destroyed. #}
+    <div class="mt-6">
+      <a href="/workspaces/destroyed" id="landing-destroyed"
+         class="inline-flex items-center gap-2 type-helper text-tertiary hover:text-primary no-underline">
+        <span>Recently destroyed workspaces</span>
+      </a>
+    </div>
 
     {# Providers panel: rendered empty server-side, populated by the SSE
        providers_state event. Collapsed by default to a one-line summary

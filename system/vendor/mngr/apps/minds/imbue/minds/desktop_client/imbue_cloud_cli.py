@@ -39,6 +39,10 @@ from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 _LEASE_TIMEOUT_SECONDS = 300.0
 _KEY_OP_TIMEOUT_SECONDS = 90.0
+# Force-destroy empties the bucket over S3 before deleting it, so it can run
+# far longer than the other bucket ops (many objects, plus credential
+# propagation waits).
+_BUCKET_DESTROY_TIMEOUT_SECONDS = 600.0
 
 # Env var consumed by the imbue_cloud plugin's CLI + provider config to
 # discover the connector URL. Mirrored in libs/mngr_imbue_cloud/.../config.py;
@@ -411,6 +415,10 @@ class ImbueCloudCli(MutableModel):
         max_budget: float | None = None,
         budget_duration: str | None = None,
         metadata: Mapping[str, str] | None = None,
+        # Rotate (delete + re-create) an existing key holding ``alias`` inside
+        # the single CLI invocation, instead of dead-ending on LiteLLM's
+        # unique-alias rejection. Requires ``alias``.
+        is_rotate_on_exists: bool = False,
     ) -> LiteLLMKeyMaterial:
         args: list[str] = ["keys", "litellm", "create", "--account", account]
         if alias is not None:
@@ -421,6 +429,8 @@ class ImbueCloudCli(MutableModel):
             args.extend(["--budget-duration", budget_duration])
         if metadata is not None:
             args.extend(["--metadata", _json.dumps(dict(metadata))])
+        if is_rotate_on_exists:
+            args.append("--rotate-on-exists")
         result = self._run(args, cg_name="imbue-cloud-keys-create", timeout_seconds=_KEY_OP_TIMEOUT_SECONDS)
         body = self._expect_success(result, "keys litellm create")
         return LiteLLMKeyMaterial.model_validate(body)
@@ -649,6 +659,22 @@ class ImbueCloudCli(MutableModel):
         )
         body = self._expect_success(result, "bucket info")
         return R2BucketInfo.model_validate(body)
+
+    def destroy_bucket_force(self, account: str, name: str) -> None:
+        """Empty and destroy the bucket ``name`` (short name) under ``account``.
+
+        The plugin CLI empties the bucket client-side (batched S3 deletes,
+        taking a cleanup grant when the account's keys are storage-downgraded)
+        and then destroys it. The connector refuses to destroy a
+        workspace-backup bucket whose workspace record is still ACTIVE, so a
+        live workspace's backups can never be deleted through this.
+        """
+        result = self._run(
+            ["bucket", "destroy", name, "--force", "-y", "--account", account],
+            cg_name="imbue-cloud-bucket-destroy",
+            timeout_seconds=_BUCKET_DESTROY_TIMEOUT_SECONDS,
+        )
+        self._expect_success(result, "bucket destroy")
 
     def roll_bucket_key(
         self,

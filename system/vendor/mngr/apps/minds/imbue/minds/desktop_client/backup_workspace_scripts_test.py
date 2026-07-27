@@ -28,6 +28,7 @@ from imbue.minds.desktop_client.backup_workspace_scripts import build_workspace_
 from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
 from imbue.minds.desktop_client.restic_cli import _get_restic_binary
 from imbue.minds.testing import run_git_for_backup_test
+from imbue.minds.testing import tag_cross_layout_release_content
 from imbue.minds.testing import tag_newer_release_content
 from imbue.minds.testing import write_stub_supervisorctl
 
@@ -194,6 +195,22 @@ def test_check_script_reports_outdated_on_a_new_layout_workspace(tmp_path: Path)
     # read "matches").
     repo = _make_workspace_repo(tmp_path, code_path="system/libs/host_backup")
     tag_newer_release_content(repo, code_path="system/libs/host_backup")
+    stub_bin = _make_stub_bin(tmp_path)
+    run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minimum-tag", "minds-v2.0.0"), extra_path=stub_bin)
+    payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["code_state"] == "outdated"
+
+
+def test_check_script_reports_outdated_when_the_tag_uses_the_pre_declutter_layout(tmp_path: Path) -> None:
+    # A decluttered workspace checked against a tag cut before the declutter:
+    # the tag stores the code at libs/host_backup, the workspace at
+    # system/libs/host_backup. Differing content must read as outdated (a
+    # same-path diff would see nothing on the tag side).
+    repo = _make_workspace_repo(tmp_path, code_path="system/libs/host_backup")
+    tag_cross_layout_release_content(
+        repo, workspace_code_path="system/libs/host_backup", tag_code_path="libs/host_backup"
+    )
     stub_bin = _make_stub_bin(tmp_path)
     run = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minimum-tag", "minds-v2.0.0"), extra_path=stub_bin)
     payload = extract_marker_json(run["stdout"], CHECK_RESULT_MARKER)
@@ -468,6 +485,64 @@ def test_apply_update_converges_new_layout_code_to_the_tag(tmp_path: Path) -> No
     assert (repo / "system" / "libs" / "host_backup" / "service.py").read_text() == "VERSION = 2\n"
     subject = run_git_for_backup_test(repo, "log", "-1", "--format=%s").strip()
     assert subject == "backup-update: minds-v2.0.0"
+
+
+def test_apply_update_converges_a_decluttered_workspace_onto_a_pre_declutter_tag(tmp_path: Path) -> None:
+    # The update target (e.g. the shipped minimum tag) predates the declutter,
+    # so its tree stores the code at libs/host_backup while the workspace runs
+    # it from system/libs/host_backup. The converge must land the tag's content
+    # at the workspace's path -- and afterwards the check must read "matches"
+    # across the rename.
+    repo = _make_workspace_repo(tmp_path, code_path="system/libs/host_backup")
+    tag_cross_layout_release_content(
+        repo, workspace_code_path="system/libs/host_backup", tag_code_path="libs/host_backup"
+    )
+
+    stub_bin = _make_stub_bin(tmp_path)
+    run = _run_script(
+        repo, BACKUP_APPLY_UPDATE_SCRIPT, ("--minds-version", "2.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
+    )
+    payload = extract_marker_json(run["stdout"], UPDATE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["status"] == "ok", payload
+    assert payload["committed"] is True
+    assert (repo / "system" / "libs" / "host_backup" / "service.py").read_text() == "VERSION = 2\n"
+    assert not (repo / "libs" / "host_backup").exists()
+    subject = run_git_for_backup_test(repo, "log", "-1", "--format=%s").strip()
+    assert subject == "backup-update: minds-v2.0.0"
+
+    recheck = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minimum-tag", "minds-v2.0.0"), extra_path=stub_bin)
+    recheck_payload = extract_marker_json(recheck["stdout"], CHECK_RESULT_MARKER)
+    assert recheck_payload is not None, recheck
+    assert recheck_payload["code_state"] == "matches"
+
+
+def test_apply_update_converges_a_pre_declutter_workspace_onto_a_decluttered_tag(tmp_path: Path) -> None:
+    # The production-critical reverse direction: an old-layout workspace
+    # updating to a release cut after the declutter must receive the tag's
+    # system/libs/host_backup content at its own libs/host_backup.
+    repo = _make_workspace_repo(tmp_path)
+    tag_cross_layout_release_content(
+        repo, workspace_code_path="libs/host_backup", tag_code_path="system/libs/host_backup"
+    )
+
+    stub_bin = _make_stub_bin(tmp_path)
+    run = _run_script(
+        repo, BACKUP_APPLY_UPDATE_SCRIPT, ("--minds-version", "2.0.0", "--agent-id", "agent-x"), extra_path=stub_bin
+    )
+    payload = extract_marker_json(run["stdout"], UPDATE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["status"] == "ok", payload
+    assert payload["committed"] is True
+    assert (repo / "libs" / "host_backup" / "service.py").read_text() == "VERSION = 2\n"
+    assert not (repo / "system" / "libs" / "host_backup").exists()
+    subject = run_git_for_backup_test(repo, "log", "-1", "--format=%s").strip()
+    assert subject == "backup-update: minds-v2.0.0"
+
+    recheck = _run_script(repo, BACKUP_CHECK_SCRIPT, ("--minimum-tag", "minds-v2.0.0"), extra_path=stub_bin)
+    recheck_payload = extract_marker_json(recheck["stdout"], CHECK_RESULT_MARKER)
+    assert recheck_payload is not None, recheck
+    assert recheck_payload["code_state"] == "matches"
 
 
 def test_apply_update_removes_files_deleted_in_the_target_tag(tmp_path: Path) -> None:

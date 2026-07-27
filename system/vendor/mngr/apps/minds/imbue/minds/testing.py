@@ -188,6 +188,26 @@ def tag_newer_release_content(
     run_git_for_backup_test(repo, "checkout", "-q", "main")
 
 
+def tag_cross_layout_release_content(repo: Path, *, workspace_code_path: str, tag_code_path: str) -> None:
+    """Commit newer backup code at the *other* declutter-era path and tag it ``minds-v2.0.0``.
+
+    The release commit moves the backup-service directory from
+    ``workspace_code_path`` to ``tag_code_path`` before writing the newer
+    content, so the tag's tree carries the code only at ``tag_code_path`` --
+    the shape of a pre-declutter tag seen from a decluttered workspace (or
+    the reverse). HEAD (main) keeps the workspace layout and reads as
+    *outdated* relative to the tag.
+    """
+    run_git_for_backup_test(repo, "checkout", "-q", "-b", "release")
+    (repo / tag_code_path).parent.mkdir(parents=True, exist_ok=True)
+    run_git_for_backup_test(repo, "mv", workspace_code_path, tag_code_path)
+    (repo / tag_code_path / "service.py").write_text("VERSION = 2\n")
+    run_git_for_backup_test(repo, "add", "-A")
+    run_git_for_backup_test(repo, "commit", "-q", "-m", "release content")
+    run_git_for_backup_test(repo, "tag", "minds-v2.0.0")
+    run_git_for_backup_test(repo, "checkout", "-q", "main")
+
+
 # -- Workspace-sync e2e (snapshot sandbox + real connector env) ---------------
 #
 # The sync e2e release tests (apps/minds/test_sync_e2e.py) run in the

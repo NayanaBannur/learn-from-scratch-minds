@@ -92,29 +92,29 @@ Only needed when the release advances the DEFAULT_WORKSPACE_TEMPLATE
 `.mngr/apt-snapshot-timestamp` (the pinned Debian archive timestamp every
 workspace's apt sources resolve against). The mirror must serve the new
 timestamp BEFORE the bump commit lands anywhere an image could be built from,
-or fresh builds fail on missing indexes. Synchronously, via the connector's
-admin routes (the same `MINDS_ADMIN_KEY` auth as `admin paid`):
+or fresh builds fail on missing indexes. Run the `apt-mirror` operator CLI
+with the R2 credentials from the `secrets/minds/production/apt-mirror` Vault
+entry exported (see `apps/apt_mirror/README.md`):
 
 ```bash
-# Freeze the index set for the new timestamp (idempotent; minutes):
-curl -sf -X POST "$CONNECTOR_URL/apt-mirror/cut" \
-    -H "Authorization: Bearer $MINDS_ADMIN_KEY" -H 'Content-Type: application/json' \
-    -d '{"timestamp": "<YYYYMMDDTHHMMSSZ>"}'
-# Then warm the pool (each call fetches for a bounded time, then returns
-# a progress report); re-run until is_complete is true:
-curl -sf -X POST "$CONNECTOR_URL/apt-mirror/warm" \
-    -H "Authorization: Bearer $MINDS_ADMIN_KEY" -H 'Content-Type: application/json' \
-    -d '{"timestamp": "<YYYYMMDDTHHMMSSZ>"}'
+# Freeze the index set for the new timestamp (idempotent; minutes). On
+# success this rewrites apps/apt_mirror/current-timestamp -- commit it.
+uv run apt-mirror cut --timestamp <YYYYMMDDTHHMMSSZ>
+# Pre-fetch the committed package lists' pool files (parallel; exits
+# nonzero on any gap), then double-check read-only:
+uv run apt-mirror warm
+uv run apt-mirror verify
 ```
 
 Only after the cut succeeds, commit the new timestamp to
-`.mngr/apt-snapshot-timestamp` on the DEFAULT_WORKSPACE_TEMPLATE branch.
-Workspaces without a configured `APT_MIRROR_BASE_URL` fall back to
+`.mngr/apt-snapshot-timestamp` on the DEFAULT_WORKSPACE_TEMPLATE branch --
+it must match the freshly committed `apps/apt_mirror/current-timestamp`.
+Setting `APT_MIRROR_BASE_URL` empty in a workspace build falls back to
 snapshot.debian.org at the same timestamp (correct but throttled), so a
-not-yet-warmed mirror degrades to slow, never to wrong. Bring-up note: the
-very first cut on a fresh tier is this same call -- deploy the connector with
-the `apt-mirror` secrets (see `.minds/template/apt-mirror.sh`), cut, then pin
-sources.
+not-yet-warmed mirror degrades to slow, never to wrong; warming only
+pre-pays the read-through for the packages workspaces actually install.
+Bring-up note: the very first cut ever is this same command -- see the
+one-time bring-up runbook in `apps/apt_mirror/README.md`.
 
 ### 1. Bump version + FALLBACK_BRANCH (mngr branch)
 

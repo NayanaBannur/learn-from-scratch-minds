@@ -81,8 +81,9 @@ OFFICIAL_REMOTE_NAME = "official"
 DEFAULT_OFFICIAL_REMOTE_URL = "https://github.com/imbue-ai/default-workspace-template.git"
 # The backup-service code inside the workspace: system/libs/host_backup on the
 # decluttered template layout, libs/host_backup on pre-declutter workspaces.
-# Resolved from the workspace's own tree (cwd is always the workspace root) so
-# the check diff and the update checkout target the path that exists here.
+# Resolved from the workspace's own tree (cwd is always the workspace root);
+# pathspecs addressed at a *tag's* tree instead follow that tag's own layout
+# via _backup_code_path_in_tree, since the two can differ across the declutter.
 BACKUP_CODE_PATH = "system/libs/host_backup" if _os.path.isdir("system/libs/host_backup") else "libs/host_backup"
 RESTIC_ENV_PATH = "data/.secrets/restic.env"
 GIT_IDENTITY = ["-c", "user.name=minds-backup-update", "-c", "user.email=backup-update@minds.local"]
@@ -129,6 +130,21 @@ def _has_flag(flag):
 
 def _tag_exists(tag):
     return _run(["git", "rev-parse", "-q", "--verify", "refs/tags/%s" % tag]).returncode == 0
+
+
+def _backup_code_path_in_tree(ref):
+    """The backup-service path as laid out in ref's tree, or "" if absent.
+
+    Tags cut before the workspace-root declutter store the code at
+    libs/host_backup; decluttered trees at system/libs/host_backup. The
+    workspace's own layout (BACKUP_CODE_PATH) and a target tag's layout can
+    therefore differ in either direction, and diff/checkout pathspecs must
+    follow the tree they address.
+    """
+    for candidate in ("system/libs/host_backup", "libs/host_backup"):
+        if _run(["git", "rev-parse", "-q", "--verify", "%s:%s" % (ref, candidate)]).returncode == 0:
+            return candidate
+    return ""
 
 
 def _official_url():
@@ -227,11 +243,29 @@ def _compute_code_state(minimum_tag, installed_version):
        needed because backup updates land as *content* commits, which never
        make the minimum tag an ancestor on workspaces created before it.
     """
-    diffed = _run(["git", "diff", "--quiet", minimum_tag, "--", BACKUP_CODE_PATH])
-    if diffed.returncode == 0:
-        return "matches", ""
-    if diffed.returncode != 1:
-        return "unverifiable", ("git diff failed: %s" % (diffed.stderr or diffed.stdout).strip()[-500:])
+    tag_path = _backup_code_path_in_tree(minimum_tag) or BACKUP_CODE_PATH
+    if tag_path == BACKUP_CODE_PATH:
+        diffed = _run(["git", "diff", "--quiet", minimum_tag, "--", BACKUP_CODE_PATH])
+        if diffed.returncode == 0:
+            return "matches", ""
+        if diffed.returncode != 1:
+            return "unverifiable", ("git diff failed: %s" % (diffed.stderr or diffed.stdout).strip()[-500:])
+    else:
+        # The tag lays the code out at the other declutter-era path, so a
+        # same-path `git diff` can never match. Content equality across the
+        # rename is tree-hash equality between the tag's directory and the
+        # committed workspace directory, with a clean worktree at that path
+        # (the same predicate the same-path worktree diff answers).
+        src_tree = _run(["git", "rev-parse", "-q", "--verify", "%s:%s" % (minimum_tag, tag_path)])
+        dest_tree = _run(["git", "rev-parse", "-q", "--verify", "HEAD:%s" % BACKUP_CODE_PATH])
+        dirty = _run(["git", "status", "--porcelain", "--", BACKUP_CODE_PATH]).stdout.strip()
+        if (
+            src_tree.returncode == 0
+            and dest_tree.returncode == 0
+            and src_tree.stdout.strip() == dest_tree.stdout.strip()
+            and not dirty
+        ):
+            return "matches", ""
     ancestor = _run(["git", "merge-base", "--is-ancestor", minimum_tag, "HEAD"])
     if ancestor.returncode == 0:
         return "newer", ""
@@ -435,9 +469,24 @@ BACKUP_CHECK_SCRIPT: Final[str] = (
     _SCRIPT_PREAMBLE
     + r"""
 
+def _workspace_uptime_seconds():
+    # Elapsed seconds of PID 1 = how long this workspace (container/VM) has
+    # been up. /proc/uptime is NOT namespaced under plain runc docker (it
+    # reports the host's uptime), so PID 1's elapsed time is the portable
+    # container-uptime signal.
+    listed = _run(["ps", "-o", "etimes=", "-p", "1"])
+    if listed.returncode != 0:
+        return None
+    try:
+        return float(listed.stdout.strip())
+    except ValueError:
+        return None
+
+
 def _main():
     minimum = _arg_value("--minimum-tag")
     result = {"schema": 1}
+    result["uptime_seconds"] = _workspace_uptime_seconds()
     installed_version = _installed_backup_version()
     result["installed_version"] = installed_version
     tag, tag_error = _resolve_minimum_tag(minimum)
@@ -557,7 +606,16 @@ def _main():
         _git(["checkout", "HEAD", "--", BACKUP_CODE_PATH])
         _pop_stash_into(result)
         _finish(result, "failed", "git rm failed: %s" % (removed.stderr or removed.stdout).strip()[-500:])
-    checked_out = _git(["checkout", tag, "--", BACKUP_CODE_PATH])
+    tag_path = _backup_code_path_in_tree(tag) or BACKUP_CODE_PATH
+    if tag_path == BACKUP_CODE_PATH:
+        checked_out = _git(["checkout", tag, "--", BACKUP_CODE_PATH])
+    else:
+        # The tag stores the code at the other declutter-era path; a same-path
+        # checkout can never match its tree. Stage the tag's subtree at the
+        # workspace's path, then materialize the staged entries.
+        checked_out = _git(["read-tree", "--prefix=%s/" % BACKUP_CODE_PATH, "%s:%s" % (tag, tag_path)])
+        if checked_out.returncode == 0:
+            checked_out = _git(["checkout", "--", BACKUP_CODE_PATH])
     if checked_out.returncode != 0:
         _git(["checkout", "HEAD", "--", BACKUP_CODE_PATH])
         _pop_stash_into(result)

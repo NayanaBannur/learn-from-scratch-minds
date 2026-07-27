@@ -5,6 +5,9 @@ import json
 import threading
 from collections.abc import Callable
 from collections.abc import Iterator
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -20,6 +23,7 @@ from supertokens_python.recipe.session.exceptions import SuperTokensSessionError
 import imbue.remote_service_connector.app as app_mod
 from imbue.remote_service_connector.app import AuthPolicy
 from imbue.remote_service_connector.app import CloudflareApiError
+from imbue.remote_service_connector.app import DESTROYED_WORKSPACE_BACKUP_RETENTION_SECONDS
 from imbue.remote_service_connector.app import ForwardingCtx
 from imbue.remote_service_connector.app import HttpCloudflareOps
 from imbue.remote_service_connector.app import InvalidR2BucketNameError
@@ -43,6 +47,7 @@ from imbue.remote_service_connector.app import cf_check
 from imbue.remote_service_connector.app import cf_list_all_pages
 from imbue.remote_service_connector.app import clear_paid_status_cache
 from imbue.remote_service_connector.app import derive_s3_secret_access_key
+from imbue.remote_service_connector.app import derive_user_id_prefix
 from imbue.remote_service_connector.app import extract_service_name
 from imbue.remote_service_connector.app import extract_user_id_prefix_from_tunnel_name
 from imbue.remote_service_connector.app import get_sync_store
@@ -51,7 +56,9 @@ from imbue.remote_service_connector.app import is_email_paid_in_db
 from imbue.remote_service_connector.app import make_bucket_name
 from imbue.remote_service_connector.app import make_hostname
 from imbue.remote_service_connector.app import make_tunnel_name
+from imbue.remote_service_connector.app import parse_workspace_backup_bucket_name
 from imbue.remote_service_connector.app import require_ally_eligible
+from imbue.remote_service_connector.app import run_backup_retention_reap
 from imbue.remote_service_connector.app import slugify_r2_name
 from imbue.remote_service_connector.app import verify_bucket_ownership
 from imbue.remote_service_connector.app import web_app
@@ -70,6 +77,7 @@ from imbue.remote_service_connector.testing import make_fake_forwarding_ctx
 from imbue.remote_service_connector.testing import make_fake_grant_store
 from imbue.remote_service_connector.testing import make_fake_key_store
 from imbue.remote_service_connector.testing import make_fake_litellm_backend
+from imbue.remote_service_connector.testing import make_fake_orphan_bucket_store
 from imbue.remote_service_connector.testing import make_fake_pool_backend
 from imbue.remote_service_connector.testing import make_fake_supertokens_backend
 from imbue.remote_service_connector.testing import make_fake_sync_store
@@ -3106,6 +3114,26 @@ def test_put_and_list_workspace_records_round_trips(monkeypatch: pytest.MonkeyPa
     assert records[0]["created_at"]
 
 
+def test_workspace_record_endpoints_serve_the_destroyed_at_stamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The server-side stamp must reach clients through the wire model: minds'
+    # backup reaper and the destroyed-workspaces countdown age against it.
+    client, _store, _caller = _make_sync_test_client(monkeypatch)
+    active = client.put("/sync/records/host-aaa111", json=_sync_record_body(), headers=_user_headers())
+    assert active.status_code == 200
+    assert active.json()["destroyed_at"] is None
+
+    tombstone = client.put(
+        "/sync/records/host-aaa111",
+        json=_sync_record_body(revision=2, state="destroyed"),
+        headers=_user_headers(),
+    )
+    assert tombstone.status_code == 200
+    assert tombstone.json()["destroyed_at"]
+
+    listed = client.get("/sync/records", headers=_user_headers()).json()["records"]
+    assert listed[0]["destroyed_at"] == tombstone.json()["destroyed_at"]
+
+
 def test_put_workspace_record_rejects_mismatched_path_host_id(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _store, _caller = _make_sync_test_client(monkeypatch)
     resp = client.put("/sync/records/host-other", json=_sync_record_body(), headers=_user_headers())
@@ -4683,38 +4711,276 @@ def test_plans_migration_declares_all_quota_columns() -> None:
         assert migration_sql.count(column) >= 2, f"quota column {column!r} missing from a table"
 
 
-# -- Apt mirror route tests (service logic is covered in apt_mirror_test.py) --
+# -- Destroyed-workspace backup retention: naming, stamping, reaper, endpoints --
 
-_APT_MIRROR_ENV_VARS = (
-    "APT_MIRROR_R2_ENDPOINT",
-    "APT_MIRROR_R2_BUCKET",
-    "APT_MIRROR_R2_ACCESS_KEY_ID",
-    "APT_MIRROR_R2_SECRET_ACCESS_KEY",
+
+def test_parse_workspace_backup_bucket_name_splits_prefix_and_host_id() -> None:
+    assert parse_workspace_backup_bucket_name("abc123--host-9c35c0cf") == ("abc123", "host-9c35c0cf")
+
+
+@pytest.mark.parametrize(
+    "bad_name",
+    ["no-separator", "abc123--my-data", "abc123--host-XYZ", "--host-abc", "abc123--host-"],
 )
-_APT_MIRROR_TIMESTAMP_BODY = {"timestamp": "20260725T000000Z"}
+def test_parse_workspace_backup_bucket_name_rejects_non_backup_names(bad_name: str) -> None:
+    assert parse_workspace_backup_bucket_name(bad_name) is None
 
 
-def test_apt_mirror_routes_return_503_when_unconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
-    """All four mirror routes answer 503 until the APT_MIRROR_* env configuration is present."""
-    for env_var in _APT_MIRROR_ENV_VARS:
-        monkeypatch.delenv(env_var, raising=False)
-    monkeypatch.setenv("MINDS_ADMIN_KEY", _ADMIN_KEY_TEST_VALUE)
-    client = TestClient(web_app)
-    assert client.get("/snap/20260725T000000Z/debian/dists/trixie/InRelease").status_code == 503
-    assert client.get("/snap/20260725T000000Z/debian/pool/main/f/foo/foo_1.0_amd64.deb").status_code == 503
-    cut = client.post("/apt-mirror/cut", headers=_admin_key_headers(), json=_APT_MIRROR_TIMESTAMP_BODY)
-    assert cut.status_code == 503
-    warm = client.post("/apt-mirror/warm", headers=_admin_key_headers(), json=_APT_MIRROR_TIMESTAMP_BODY)
-    assert warm.status_code == 503
+def test_postgres_sync_store_stamps_destroyed_at_and_clears_on_resurrection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _backend = _make_postgres_sync_store(monkeypatch)
+    active = store.put_record("user-1", _store_record())
+    assert active["destroyed_at"] is None
+
+    tombstoned = store.put_record("user-1", _store_record(state="destroyed", revision=2))
+    assert tombstoned["destroyed_at"] is not None
+
+    # A further destroyed-state update keeps the original stamp.
+    updated = store.put_record("user-1", _store_record(state="destroyed", display_name="renamed", revision=3))
+    assert updated["destroyed_at"] == tombstoned["destroyed_at"]
+
+    resurrected = store.put_record("user-1", _store_record(state="active", revision=4))
+    assert resurrected["destroyed_at"] is None
 
 
-def test_apt_mirror_cut_and_warm_require_admin_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Cut/warm authenticate before the config gate: bad or missing credentials are 401, not 503."""
-    monkeypatch.setenv("MINDS_ADMIN_KEY", _ADMIN_KEY_TEST_VALUE)
-    client = TestClient(web_app)
-    assert client.post("/apt-mirror/cut", json=_APT_MIRROR_TIMESTAMP_BODY).status_code == 401
-    assert client.post("/apt-mirror/warm", json=_APT_MIRROR_TIMESTAMP_BODY).status_code == 401
-    wrong_key_headers = {"Authorization": "Bearer wrong-key"}
-    assert (
-        client.post("/apt-mirror/cut", headers=wrong_key_headers, json=_APT_MIRROR_TIMESTAMP_BODY).status_code == 401
+def _make_reap_deps() -> tuple[Any, Any, Any, Any]:
+    """(ops, sync_store, key_store, orphan_store) fakes for direct reaper runs."""
+    fake_ctx = make_fake_forwarding_ctx()
+    return fake_ctx.fake, make_fake_sync_store(), make_fake_key_store(), make_fake_orphan_bucket_store()
+
+
+def _seed_destroyed_record_with_bucket(ops: Any, sync_store: Any, user_id: str, host_id: str) -> str:
+    """Tombstone a record for (user_id, host_id) and create its (non-empty) backup bucket."""
+    sync_store.put_record(user_id, _store_record(host_id=host_id, agent_id=f"agent-{host_id}", state="destroyed"))
+    bucket_name = f"{derive_user_id_prefix(user_id)}--{host_id}"
+    ops.create_bucket(bucket_name)
+    ops.bucket_objects[bucket_name] = ["data/a", "data/b", "config"]
+    return bucket_name
+
+
+def test_backup_retention_reap_deletes_bucket_then_record() -> None:
+    ops, sync_store, key_store, orphan_store = _make_reap_deps()
+    bucket_name = _seed_destroyed_record_with_bucket(ops, sync_store, "user-1", "host-aaa111")
+
+    counters = run_backup_retention_reap(ops, sync_store, key_store, orphan_store, window_seconds=0.0)
+
+    assert counters["records_reaped"] == 1
+    assert counters["buckets_deleted"] == 1
+    assert counters["objects_deleted"] == 3
+    assert bucket_name not in ops.buckets
+    assert sync_store.list_records("user-1") == []
+
+
+def test_backup_retention_reap_leaves_records_inside_the_window() -> None:
+    ops, sync_store, key_store, orphan_store = _make_reap_deps()
+    bucket_name = _seed_destroyed_record_with_bucket(ops, sync_store, "user-1", "host-aaa111")
+
+    counters = run_backup_retention_reap(ops, sync_store, key_store, orphan_store)
+
+    assert counters["records_reaped"] == 0
+    assert bucket_name in ops.buckets
+    assert len(sync_store.list_records("user-1")) == 1
+
+
+def test_backup_retention_reap_reaps_record_without_bucket() -> None:
+    ops, sync_store, key_store, orphan_store = _make_reap_deps()
+    sync_store.put_record("user-1", _store_record(host_id="host-aaa111", state="destroyed"))
+
+    counters = run_backup_retention_reap(ops, sync_store, key_store, orphan_store, window_seconds=0.0)
+
+    assert counters["records_reaped"] == 1
+    assert counters["buckets_deleted"] == 0
+    assert sync_store.list_records("user-1") == []
+
+
+def test_backup_retention_reap_never_touches_non_backup_named_buckets() -> None:
+    # A destroyed record whose host_id is not in the reserved `host-<hex>`
+    # shape must be reaped without bucket work: its name could collide with a
+    # generic user bucket, which is never the reaper's to delete.
+    ops, sync_store, key_store, orphan_store = _make_reap_deps()
+    sync_store.put_record("user-1", _store_record(host_id="my-data", agent_id="agent-x", state="destroyed"))
+    generic_bucket = f"{derive_user_id_prefix('user-1')}--my-data"
+    ops.create_bucket(generic_bucket)
+    ops.bucket_objects[generic_bucket] = ["keep-me"]
+
+    counters = run_backup_retention_reap(ops, sync_store, key_store, orphan_store, window_seconds=0.0)
+
+    assert counters["records_reaped"] == 1
+    assert counters["buckets_deleted"] == 0
+    assert generic_bucket in ops.buckets
+    assert sync_store.list_records("user-1") == []
+
+
+def test_backup_retention_reap_stamps_orphans_then_reaps_after_the_window() -> None:
+    ops, sync_store, key_store, orphan_store = _make_reap_deps()
+    orphan_bucket = "someuser12345678--host-bbb222"
+    ops.create_bucket(orphan_bucket)
+    ops.bucket_objects[orphan_bucket] = ["x"]
+
+    # First sighting stamps the orphan clock but deletes nothing.
+    first = run_backup_retention_reap(ops, sync_store, key_store, orphan_store)
+    assert first["orphan_buckets_reaped"] == 0
+    assert orphan_bucket in ops.buckets
+    assert orphan_store.get_first_seen(orphan_bucket) is not None
+
+    # Backdate the stamp past the window: the next pass reaps the bucket.
+    orphan_store.stamps_by_bucket[orphan_bucket] = datetime.now(timezone.utc) - timedelta(days=31)
+    second = run_backup_retention_reap(ops, sync_store, key_store, orphan_store)
+    assert second["orphan_buckets_reaped"] == 1
+    assert orphan_bucket not in ops.buckets
+    assert orphan_store.get_first_seen(orphan_bucket) is None
+
+
+def test_backup_retention_reap_clears_stamps_for_referenced_buckets() -> None:
+    ops, sync_store, key_store, orphan_store = _make_reap_deps()
+    bucket_name = f"{derive_user_id_prefix('user-1')}--host-ccc333"
+    ops.create_bucket(bucket_name)
+    sync_store.put_record("user-1", _store_record(host_id="host-ccc333", state="active"))
+    orphan_store.stamps_by_bucket[bucket_name] = datetime.now(timezone.utc) - timedelta(days=40)
+
+    counters = run_backup_retention_reap(ops, sync_store, key_store, orphan_store)
+
+    # The record protects the bucket even with an (obsolete) orphan stamp.
+    assert counters["orphan_buckets_reaped"] == 0
+    assert bucket_name in ops.buckets
+    assert orphan_store.get_first_seen(bucket_name) is None
+
+
+def test_backup_retention_reap_dry_run_reports_without_deleting() -> None:
+    ops, sync_store, key_store, orphan_store = _make_reap_deps()
+    bucket_name = _seed_destroyed_record_with_bucket(ops, sync_store, "user-1", "host-aaa111")
+    orphan_bucket = "someuser12345678--host-bbb222"
+    ops.create_bucket(orphan_bucket)
+
+    result = run_backup_retention_reap(ops, sync_store, key_store, orphan_store, window_seconds=0.0, dry_run=True)
+
+    assert result["dry_run"] is True
+    kinds = sorted(candidate["kind"] for candidate in result["candidates"])
+    assert kinds == ["orphan", "record"]
+    assert bucket_name in ops.buckets
+    assert orphan_bucket in ops.buckets
+    assert len(sync_store.list_records("user-1")) == 1
+    # Dry-run must not write orphan stamps either.
+    assert orphan_store.get_first_seen(orphan_bucket) is None
+
+
+def test_create_bucket_rejects_reserved_host_prefix_without_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _fake, _store = _make_bucket_test_client(monkeypatch)
+    backend = make_fake_pool_backend()
+    backend.install_on_app_module(app_mod, monkeypatch)
+
+    resp = client.post("/buckets", json={"name": "host-abc123"}, headers=_user_headers())
+
+    assert resp.status_code == 403
+    assert "reserved" in resp.json()["detail"]
+
+
+def test_create_bucket_rejects_reserved_host_prefix_in_slugified_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The bucket is created under the slugified short name, so a raw name that
+    # only slugifies into the reserved `host-` shape must be refused too.
+    client, _fake, _store = _make_bucket_test_client(monkeypatch)
+    backend = make_fake_pool_backend()
+    backend.install_on_app_module(app_mod, monkeypatch)
+
+    resp = client.post("/buckets", json={"name": "HOST-abc123"}, headers=_user_headers())
+
+    assert resp.status_code == 403
+    assert "reserved" in resp.json()["detail"]
+
+
+def test_create_bucket_allows_host_prefix_with_workspace_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _fake, _store = _make_bucket_test_client(monkeypatch)
+    backend = make_fake_pool_backend()
+    backend.install_on_app_module(app_mod, monkeypatch)
+    backend.sync_record_rows.append(
+        {"user_id": _USER_STUB_USER_ID, "host_id": "host-abc123", "agent_id": "agent-1", "state": "active"}
     )
+
+    resp = client.post("/buckets", json={"name": "host-abc123"}, headers=_user_headers())
+
+    assert resp.status_code == 200
+    assert resp.json()["bucket"]["bucket_name"] == f"{_USER_STUB_USER_ID_PREFIX}--host-abc123"
+
+
+def test_delete_bucket_refuses_while_workspace_record_is_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, fake, _store = _make_bucket_test_client(monkeypatch)
+    backend = make_fake_pool_backend()
+    backend.install_on_app_module(app_mod, monkeypatch)
+    backend.sync_record_rows.append(
+        {"user_id": _USER_STUB_USER_ID, "host_id": "host-abc123", "agent_id": "agent-1", "state": "active"}
+    )
+    fake.create_bucket(f"{_USER_STUB_USER_ID_PREFIX}--host-abc123")
+
+    resp = client.delete("/buckets/host-abc123", headers=_user_headers())
+
+    assert resp.status_code == 409
+    assert "still active" in resp.json()["detail"]
+
+    # Tombstoning the record unlocks the destroy.
+    backend.sync_record_rows[0]["state"] = "destroyed"
+    resp_after = client.delete("/buckets/host-abc123", headers=_user_headers())
+    assert resp_after.status_code == 200
+
+
+def test_delete_bucket_interlock_applies_to_slugified_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The bucket is deleted under the slugified short name, so a case variant
+    # of the path parameter must hit the same ACTIVE-record interlock.
+    client, fake, _store = _make_bucket_test_client(monkeypatch)
+    backend = make_fake_pool_backend()
+    backend.install_on_app_module(app_mod, monkeypatch)
+    backend.sync_record_rows.append(
+        {"user_id": _USER_STUB_USER_ID, "host_id": "host-abc123", "agent_id": "agent-1", "state": "active"}
+    )
+    fake.create_bucket(f"{_USER_STUB_USER_ID_PREFIX}--host-abc123")
+
+    resp = client.delete("/buckets/HOST-abc123", headers=_user_headers())
+
+    assert resp.status_code == 409
+    assert "still active" in resp.json()["detail"]
+
+
+def test_destroyed_workspace_backup_policy_endpoint_is_public(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _fake, _store = _make_bucket_test_client(monkeypatch)
+    resp = client.get("/policies/destroyed-workspace-backups")
+    assert resp.status_code == 200
+    assert resp.json() == {"retention_seconds": DESTROYED_WORKSPACE_BACKUP_RETENTION_SECONDS}
+
+
+def test_admin_backup_retention_reap_endpoint_reaps_with_window_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, fake, _store = _make_bucket_test_client(monkeypatch)
+    monkeypatch.setenv("MINDS_ADMIN_KEY", _ADMIN_KEY_TEST_VALUE)
+    backend = make_fake_pool_backend()
+    backend.install_on_app_module(app_mod, monkeypatch)
+    destroyed_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+    backend.sync_record_rows.append(
+        {
+            "user_id": _USER_STUB_USER_ID,
+            "host_id": "host-abc123",
+            "agent_id": "agent-1",
+            "state": "destroyed",
+            "destroyed_at": destroyed_at,
+        }
+    )
+    bucket_name = f"{derive_user_id_prefix(_USER_STUB_USER_ID)}--host-abc123"
+    fake.create_bucket(bucket_name)
+    fake.bucket_objects[bucket_name] = ["obj-1"]
+
+    dry = client.post("/admin/sweep/backup-retention?dry_run=1&window_seconds=0", headers=_admin_key_headers())
+    assert dry.status_code == 200
+    assert dry.json()["result"]["dry_run"] is True
+    assert bucket_name in fake.buckets
+
+    real = client.post("/admin/sweep/backup-retention?window_seconds=0", headers=_admin_key_headers())
+    assert real.status_code == 200
+    assert real.json()["result"]["records_reaped"] == 1
+    assert bucket_name not in fake.buckets
+    assert backend.sync_record_rows == []
+
+
+def test_admin_backup_retention_reap_endpoint_requires_admin_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _fake, _store = _make_bucket_test_client(monkeypatch)
+    resp = client.post("/admin/sweep/backup-retention")
+    assert resp.status_code in (401, 403)

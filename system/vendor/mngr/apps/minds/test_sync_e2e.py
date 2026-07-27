@@ -529,7 +529,10 @@ def _container_backup_diagnostics(container_name: str) -> str:
     parts: list[str] = []
     for label, command in (
         ("supervisor", "supervisorctl status host-backup"),
-        ("events", "tail -c 3000 /home/user/.mngr/agents/*/events/backup/events.jsonl 2>/dev/null || echo no-events-file"),
+        (
+            "events",
+            "tail -c 3000 /home/user/.mngr/agents/*/events/backup/events.jsonl 2>/dev/null || echo no-events-file",
+        ),
         ("env", "test -f /home/user/workspace/data/.secrets/restic.env && echo env-present || echo env-missing"),
     ):
         result = subprocess.run(

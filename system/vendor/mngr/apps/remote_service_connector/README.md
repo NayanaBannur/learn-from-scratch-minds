@@ -224,6 +224,17 @@ Cloudflare's R2 token model has no delete-without-write permission, and restic's
 - A grant settles as *successful* when usage decreased at all versus its baseline. Only unsuccessful grants count against a rolling budget (5 settled-without-decrease grants per 24 hours; a 403 with `code: cleanup_grant_budget_exhausted` past that), so genuine cleanup is unlimited while write-under-cover-of-cleanup abuse is bounded to roughly one sweep interval of writes per burned grant.
 - Grants expire after 60 minutes; the sweep settles expired grants as the fallback when the client never rechecked, and skips enforcement for accounts whose grant is still active (a prune transiently *increases* usage while it repacks).
 
+### Destroyed-workspace backup retention reaper
+
+Destroyed workspaces' backups (bucket + workspace record) are retained for 30 days, then reaped. An hourly cron (`backup_retention_reap`) is the server-side backstop (minds' client-side reaper does the same work faster where a client runs; every step is idempotent so the two never conflict):
+
+- Workspace-backup buckets are identified by name: the short name after the owner prefix is the workspace's host id (`host-<hex>`). `POST /buckets` reserves that shape (refused unless a workspace record with the host id exists for the caller), and `DELETE /buckets/{name}` refuses such a bucket while its workspace record is still ACTIVE (tombstone-first is enforced server-side).
+- Records carry a server-stamped `destroyed_at` (set on the transition to `state = destroyed`, kept across destroyed-state updates, cleared on resurrection). Destroyed records older than the window lose their bucket first, then the row -- a failed or partial bucket delete leaves the row for the next pass.
+- Workspace-backup buckets referenced by **no** record at all (orphans) age from a first-seen stamp in the `orphan_backup_buckets` table; the migration's stamp-on-first-sight semantics double as the rollout grace period for pre-existing leftovers.
+- Emptying is bounded per pass (record + object budgets) and resumable, so one cron invocation never runs long; a partially-emptied bucket continues on the next pass and the deletion lands on the pass that finishes.
+- `GET /policies/destroyed-workspace-backups` (public) serves the retention window to clients.
+- `POST /admin/sweep/backup-retention` (admin-key authenticated) runs one reap pass on demand. `?dry_run=1` returns the candidate list (kind, ids, stamps) without deleting anything; `?window_seconds=<n>` overrides the window (admin-only; e.g. `0` lets a deployment test reap a fresh tombstone).
+
 ### Account (signed-in user only)
 
 - `GET /account` -- The caller's plan, entitlement values, live usage, and the available plan names. Lazily creates the entitlements row on first touch.

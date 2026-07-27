@@ -332,6 +332,7 @@ mngr imbue_cloud keys litellm create [OPTIONS]
 | `--budget-duration` | text | Budget reset duration (e.g. '1d', '30d') | None |
 | `--metadata` | text | JSON-encoded dict of metadata to attach to the key (e.g. agent_id=...) | None |
 | `--connector-url` | text | Override connector URL | None |
+| `--rotate-on-exists` | boolean | When --alias is already taken, delete the existing key and mint a fresh one (the whole rotation runs in this single invocation) | `False` |
 
 ## mngr imbue_cloud keys litellm list
 
@@ -471,6 +472,8 @@ mngr imbue_cloud bucket destroy [OPTIONS] NAME
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
+| `--force` | boolean | When the destroy is refused as non-empty, delete the bucket's contents (batched S3 deletes) and retry | `False` |
+| `--yes`, `-y` | boolean | Skip the --force confirmation prompt | `False` |
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 

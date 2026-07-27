@@ -23,6 +23,7 @@ import os
 import secrets
 import threading
 import webbrowser
+from collections.abc import Callable
 from pathlib import Path
 from typing import Final
 
@@ -50,6 +51,8 @@ from imbue.minds.desktop_client.app import start_discovery_health_watchdog_loop
 from imbue.minds.desktop_client.app import start_system_interface_health_probe_loop
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.backup_reaper import BackupReaperManager
+from imbue.minds.desktop_client.backup_reaper import make_quota_evictor
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.discovery_health import SupervisorProducerRemediator
 from imbue.minds.desktop_client.forward_cli import ForwardSubprocessConfig
@@ -72,6 +75,7 @@ from imbue.minds.desktop_client.lima_image_prefetch import make_lima_image_sourc
 from imbue.minds.desktop_client.lima_image_prefetch import resolve_release_tag_commit
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptStore
 from imbue.minds.desktop_client.request_events import LatchkeyFileSharingPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
@@ -80,6 +84,8 @@ from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.minds.desktop_client.server import desktop_client_runtime
 from imbue.minds.desktop_client.server import serve_desktop_client
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.startup_reconcile import PendingCreateAttemptDiscoverySweep
+from imbue.minds.desktop_client.startup_reconcile import StartupHostReconciler
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
@@ -411,6 +417,13 @@ def run(
     session_store = MultiAccountSessionStore(
         data_dir=data_directory, cli=imbue_cloud_cli, record_store=workspace_record_store
     )
+    backup_reaper = BackupReaperManager(
+        paths=paths,
+        record_store=workspace_record_store,
+        imbue_cloud_cli=imbue_cloud_cli,
+        connector_url=str(client_env_config.connector_url),
+        concurrency_group=root_concurrency_group,
+    )
     sync_scheduler = WorkspaceSyncScheduler(
         record_store=workspace_record_store,
         session_store=session_store,
@@ -420,6 +433,7 @@ def run(
         # observe child makes the workspace reachable now instead of on the
         # next poll.
         on_ssh_material_written=lambda: bounce_latchkey_forward_supervisor(latchkey_forward_supervisor),
+        backup_reaper=backup_reaper,
     )
     sync_scheduler.start(root_concurrency_group)
     response_events = load_response_events(data_directory)
@@ -539,6 +553,16 @@ def run(
         )
         logger.info("  lima image prefetch: started ({})", FALLBACK_BRANCH)
 
+    # Pending-create-attempt records: written before each ``mngr create`` spawns and
+    # deleted only once discovery confirms the workspace, so a quit/crash
+    # mid-create can no longer orphan a Lima/Docker VM silently. The sweep
+    # callback performs that discovery-confirmed deletion; the startup
+    # reconciler (started below) repairs whatever a previous session left.
+    pending_create_attempt_store = PendingCreateAttemptStore(records_dir=paths.data_dir / "pending_create_attempts")
+    backend_resolver.add_on_change_callback(
+        PendingCreateAttemptDiscoverySweep(store=pending_create_attempt_store, backend_resolver=backend_resolver)
+    )
+
     agent_creator = AgentCreator(
         paths=paths,
         server_port=port,
@@ -550,6 +574,36 @@ def run(
         mngr_forward_preauth_cookie=preauth_cookie,
         system_interface_health_tracker=system_interface_health_tracker,
         lima_image_gate=lima_image_gate,
+        pending_create_attempt_store=pending_create_attempt_store,
+        # CreateAttempt-row changes (a create starting, finishing, or failing) wake
+        # the chrome SSE through the resolver's change callbacks so the
+        # workspace list re-renders its creating/interrupted/failed rows
+        # without waiting for a discovery tick.
+        on_create_attempts_changed=backend_resolver.notify_change,
+        backup_quota_evictor_factory=lambda account_email: _resolve_backup_quota_evictor(
+            session_store, workspace_record_store, paths, imbue_cloud_cli, account_email
+        ),
+    )
+
+    # One-shot startup reconcile for orphaned Lima/Docker hosts: adopts
+    # finished-but-unassociated workspaces, destroys stale half-built hosts
+    # past the grace window, and gc's stale FAILED/DESTROYED host records.
+    # Runs on a background thread once discovery is available; is_checked=False
+    # so a reconcile failure degrades to log warnings instead of tearing down
+    # the app.
+    startup_host_reconciler = StartupHostReconciler(
+        backend_resolver=backend_resolver,
+        agent_creator=agent_creator,
+        pending_create_attempt_store=pending_create_attempt_store,
+        session_store=session_store,
+        mngr_binary=MNGR_BINARY,
+        mngr_host_dir=mngr_host_dir,
+        concurrency_group=root_concurrency_group,
+    )
+    root_concurrency_group.start_new_thread(
+        target=startup_host_reconciler.run_once_after_discovery,
+        name="startup-host-reconcile",
+        is_checked=False,
     )
 
     # Every newly-discovered agent on a minds-managed host gets
@@ -804,6 +858,30 @@ class _StreamedPermissionRequestHandler(FrozenModel):
             return HostId(info.host_id)
         except ValueError:
             return None
+
+
+def _resolve_backup_quota_evictor(
+    session_store: MultiAccountSessionStore,
+    workspace_record_store: WorkspaceRecordStore,
+    paths: WorkspacePaths,
+    imbue_cloud_cli: ImbueCloudCli,
+    account_email: str,
+) -> Callable[[], bool] | None:
+    """Bind quota eviction for a creation's account, or None when the account is unknown.
+
+    Partial-applied over the app's stores at startup to form the
+    ``AgentCreator.backup_quota_evictor_factory`` (account email -> evictor).
+    """
+    account = next((entry for entry in session_store.list_accounts() if str(entry.email) == account_email), None)
+    if account is None:
+        return None
+    return make_quota_evictor(
+        record_store=workspace_record_store,
+        paths=paths,
+        imbue_cloud_cli=imbue_cloud_cli,
+        user_id=str(account.user_id),
+        account_email=account_email,
+    )
 
 
 def _build_latchkey(data_directory: Path) -> Latchkey:

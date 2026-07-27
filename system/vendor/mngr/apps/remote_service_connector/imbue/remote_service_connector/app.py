@@ -35,6 +35,7 @@ from typing import Any
 from typing import Final
 from typing import NoReturn
 from typing import Protocol
+from urllib.parse import quote
 from uuid import UUID
 
 import httpx
@@ -45,7 +46,6 @@ from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Request
 from fastapi.responses import HTMLResponse
-from fastapi.responses import Response
 from paramiko.hostkeys import HostKeyEntry
 from pydantic import BaseModel
 from pydantic import Field
@@ -97,19 +97,6 @@ from tenacity import retry
 from tenacity import retry_if_exception
 from tenacity import stop_after_attempt
 from tenacity import wait_exponential
-
-from imbue.remote_service_connector.apt_mirror import APT_MIRROR_MEDIA_TYPE
-from imbue.remote_service_connector.apt_mirror import APT_MIRROR_POOL_CACHE_CONTROL
-from imbue.remote_service_connector.apt_mirror import AptMirrorChecksumMismatchError
-from imbue.remote_service_connector.apt_mirror import AptMirrorCutRequest
-from imbue.remote_service_connector.apt_mirror import AptMirrorCutResult
-from imbue.remote_service_connector.apt_mirror import AptMirrorInvalidTimestampError
-from imbue.remote_service_connector.apt_mirror import AptMirrorNotCutError
-from imbue.remote_service_connector.apt_mirror import AptMirrorObjectNotFoundError
-from imbue.remote_service_connector.apt_mirror import AptMirrorUnsafePathError
-from imbue.remote_service_connector.apt_mirror import AptMirrorWarmRequest
-from imbue.remote_service_connector.apt_mirror import AptMirrorWarmResult
-from imbue.remote_service_connector.apt_mirror import get_apt_mirror_service_or_http_503
 
 logger = logging.getLogger(__name__)
 
@@ -312,6 +299,39 @@ class R2BucketOwnershipError(PermissionError):
         self.bucket_name = bucket_name
         self.user_id_prefix = user_id_prefix
         super().__init__(f"User '{user_id_prefix}' does not own bucket '{bucket_name}'")
+
+
+class R2ReservedBucketNameError(RuntimeError):
+    """Raised when creating a `host-` prefixed bucket that no workspace record backs.
+
+    The `host-<hex>` short-name shape is reserved for workspace-backup buckets
+    (named by their workspace's host id); a generic user bucket must never be
+    able to collide with one, or the backup reapers could not tell them apart.
+    """
+
+    def __init__(self, short_name: str) -> None:
+        self.short_name = short_name
+        super().__init__(
+            f"Bucket names starting with 'host-' are reserved for workspace backups: '{short_name}'. "
+            "Pick a different name."
+        )
+
+
+class R2BucketActiveWorkspaceError(RuntimeError):
+    """Raised when destroying a workspace-backup bucket whose workspace record is still ACTIVE.
+
+    Tombstone-first is enforced server-side so a live workspace's backups can
+    never be deleted -- destroy the workspace (or remove its record) before
+    destroying its backup bucket.
+    """
+
+    def __init__(self, bucket_name: str, host_id: str) -> None:
+        self.bucket_name = bucket_name
+        self.host_id = host_id
+        super().__init__(
+            f"Bucket '{bucket_name}' holds backups for workspace '{host_id}', which is still active. "
+            "Destroy the workspace first."
+        )
 
 
 class QuotaExceededError(RuntimeError):
@@ -1081,6 +1101,32 @@ def cf_delete_bucket(client: httpx.Client, account_id: str, name: str) -> None:
         raise
 
 
+def cf_list_bucket_object_keys(client: httpx.Client, account_id: str, bucket_name: str, limit: int) -> list[str]:
+    """Return up to ``limit`` object keys from a bucket (one page; the reaper deletes and re-lists)."""
+    response = client.get(
+        f"/accounts/{account_id}/r2/buckets/{bucket_name}/objects",
+        params={"per_page": str(limit)},
+    )
+    try:
+        result = cf_check(response)["result"]
+    except CloudflareApiError as exc:
+        if exc.status_code == 404:
+            raise R2BucketNotFoundError(bucket_name) from exc
+        raise
+    return [str(obj["key"]) for obj in result if isinstance(obj, dict) and "key" in obj]
+
+
+def cf_delete_bucket_object(client: httpx.Client, account_id: str, bucket_name: str, key: str) -> None:
+    """Delete one object from a bucket (missing objects are treated as already gone)."""
+    response = client.delete(f"/accounts/{account_id}/r2/buckets/{bucket_name}/objects/{quote(key, safe='')}")
+    try:
+        cf_check(response)
+    except CloudflareApiError as exc:
+        if exc.status_code == 404:
+            return
+        raise
+
+
 def cf_list_token_permission_groups(client: httpx.Client, account_id: str) -> list[dict[str, Any]]:
     response = client.get(f"/accounts/{account_id}/tokens/permission_groups")
     return cf_check(response)["result"]
@@ -1476,6 +1522,8 @@ class CloudflareOps(Protocol):
     def create_bucket(self, name: str) -> dict[str, Any]: ...
     def list_buckets(self, name_contains: str = "") -> list[dict[str, Any]]: ...
     def delete_bucket(self, name: str) -> None: ...
+    def list_bucket_object_keys(self, bucket_name: str, limit: int) -> list[str]: ...
+    def delete_bucket_object(self, bucket_name: str, key: str) -> None: ...
     def create_bucket_token(self, bucket_name: str, access: str, token_name: str) -> dict[str, Any]: ...
     def delete_bucket_token(self, token_id: str) -> None: ...
     def update_bucket_token_access(self, token_id: str, bucket_name: str, access: str, token_name: str) -> None: ...
@@ -1601,6 +1649,12 @@ class HttpCloudflareOps:
 
     def delete_bucket(self, name: str) -> None:
         cf_delete_bucket(self.client, self.account_id, name)
+
+    def list_bucket_object_keys(self, bucket_name: str, limit: int) -> list[str]:
+        return cf_list_bucket_object_keys(self.client, self.account_id, bucket_name, limit)
+
+    def delete_bucket_object(self, bucket_name: str, key: str) -> None:
+        cf_delete_bucket_object(self.client, self.account_id, bucket_name, key)
 
     def create_bucket_token(self, bucket_name: str, access: str, token_name: str) -> dict[str, Any]:
         policies = build_r2_bucket_token_policies(self.account_id, bucket_name, self._r2_permission_group_id(access))
@@ -2756,6 +2810,10 @@ def raise_as_http(exc: Exception) -> NoReturn:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if isinstance(exc, R2BucketExistsError):
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if isinstance(exc, R2ReservedBucketNameError):
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    if isinstance(exc, R2BucketActiveWorkspaceError):
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if isinstance(exc, QuotaExceededError):
         raise HTTPException(
             status_code=403,
@@ -3121,69 +3179,6 @@ def reconcile_slice_boxes(conn: Any, env_name: str) -> int:
 # ---------------------------------------------------------------------------
 
 web_app = FastAPI()
-
-
-# ---------------------------------------------------------------------------
-# Snapshot-pinned apt mirror (see apt_mirror.py for the service layer). The
-# serve routes are public (workspace apt clients hit them unauthenticated);
-# cut/warm are operator-only. All four answer 503 until the APT_MIRROR_* env
-# configuration is present, so tiers without the mirror are unaffected.
-
-
-@web_app.get("/snap/{timestamp}/{archive}/dists/{subpath:path}")
-def get_snap_dists_file(timestamp: str, archive: str, subpath: str) -> Response:
-    """Serve a frozen index file for a cut timestamp (public, unauthenticated)."""
-    service = get_apt_mirror_service_or_http_503()
-    try:
-        data = service.serve_dists_file(timestamp, archive, subpath)
-    except AptMirrorObjectNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except (AptMirrorUnsafePathError, AptMirrorInvalidTimestampError) as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    return Response(content=data, media_type=APT_MIRROR_MEDIA_TYPE)
-
-
-@web_app.get("/snap/{timestamp}/{archive}/pool/{subpath:path}")
-def get_snap_pool_file(timestamp: str, archive: str, subpath: str) -> Response:
-    """Serve a pool file from the shared cache, reading through upstream on a miss (public)."""
-    service = get_apt_mirror_service_or_http_503()
-    try:
-        data = service.serve_pool_file(timestamp, archive, subpath)
-    except AptMirrorObjectNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except (AptMirrorUnsafePathError, AptMirrorInvalidTimestampError) as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    return Response(
-        content=data,
-        media_type=APT_MIRROR_MEDIA_TYPE,
-        headers={"Cache-Control": APT_MIRROR_POOL_CACHE_CONTROL},
-    )
-
-
-@web_app.post("/apt-mirror/cut")
-def post_apt_mirror_cut(request: Request, body: AptMirrorCutRequest) -> AptMirrorCutResult:
-    """Freeze the index set for a new timestamp (admin; run before committing a T bump)."""
-    require_admin_key(request)
-    service = get_apt_mirror_service_or_http_503()
-    try:
-        return service.cut(body)
-    except (AptMirrorInvalidTimestampError, AptMirrorUnsafePathError) as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    except (AptMirrorObjectNotFoundError, AptMirrorChecksumMismatchError) as e:
-        raise HTTPException(status_code=502, detail=str(e)) from e
-
-
-@web_app.post("/apt-mirror/warm")
-def post_apt_mirror_warm(request: Request, body: AptMirrorWarmRequest) -> AptMirrorWarmResult:
-    """Pre-fetch a cut timestamp's pool files (admin; re-run until is_complete)."""
-    require_admin_key(request)
-    service = get_apt_mirror_service_or_http_503()
-    try:
-        return service.warm(body)
-    except (AptMirrorInvalidTimestampError, AptMirrorUnsafePathError) as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    except AptMirrorNotCutError as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
 
 
 # Public env var name the deployed connector reads at startup to expose
@@ -4311,6 +4306,30 @@ def verify_bucket_ownership(bucket_name: str, user_id_prefix: str) -> None:
         raise R2BucketOwnershipError(bucket_name, user_id_prefix)
 
 
+# How long a destroyed workspace's backup (bucket + record) is retained before
+# the reapers delete it permanently. Served to clients via
+# GET /policies/destroyed-workspace-backups; a fixed constant for now (per-plan
+# retention is an explicit future option).
+DESTROYED_WORKSPACE_BACKUP_RETENTION_SECONDS: Final[float] = 60.0 * 60.0 * 24.0 * 30.0
+
+# Workspace-backup buckets are named by their workspace's host id, so the
+# short name after the owner prefix is always `host-<hex>`. This shape is
+# reserved: `bucket create` refuses it for names no workspace record backs,
+# so the reapers can identify workspace-backup buckets by name alone.
+WORKSPACE_BACKUP_SHORT_NAME_RE: Final = re.compile(r"^host-[a-f0-9]+$")
+_RESERVED_BUCKET_SHORT_NAME_PREFIX: Final[str] = "host-"
+
+
+def parse_workspace_backup_bucket_name(bucket_name: str) -> tuple[str, str] | None:
+    """Split a full bucket name into (user_id_prefix, host_id) when it is a workspace-backup bucket."""
+    if _R2_BUCKET_NAME_SEP not in bucket_name:
+        return None
+    user_id_prefix, _, short_name = bucket_name.partition(_R2_BUCKET_NAME_SEP)
+    if not user_id_prefix or not WORKSPACE_BACKUP_SHORT_NAME_RE.match(short_name):
+        return None
+    return user_id_prefix, short_name
+
+
 def r2_s3_endpoint(account_id: str) -> str:
     return f"https://{account_id}.r2.cloudflarestorage.com"
 
@@ -4785,6 +4804,34 @@ def _mint_and_record_key(
         raise HTTPException(status_code=502, detail=f"Failed to provision bucket key: {exc}") from exc
 
 
+def _workspace_record_exists(user_id: str, host_id: str) -> bool:
+    """Whether the user has a workspace record (any state) for ``host_id``."""
+    conn = _get_pool_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM workspace_records WHERE user_id = %s AND host_id = %s",
+                (user_id, host_id),
+            )
+            return cur.fetchone() is not None
+    finally:
+        conn.close()
+
+
+def _workspace_record_is_active(user_id: str, host_id: str) -> bool:
+    """Whether the user has an ACTIVE workspace record for ``host_id``."""
+    conn = _get_pool_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM workspace_records WHERE user_id = %s AND host_id = %s AND state = 'active'",
+                (user_id, host_id),
+            )
+            return cur.fetchone() is not None
+    finally:
+        conn.close()
+
+
 @web_app.post("/buckets")
 def create_bucket_endpoint(request: Request, body: CreateBucketRequest) -> dict[str, object]:
     """Create an R2 bucket for the caller and mint its single key (returned inline)."""
@@ -4795,6 +4842,18 @@ def create_bucket_endpoint(request: Request, body: CreateBucketRequest) -> dict[
         owner_user_id = _get_user_id_from_access_token(request.headers.get("authorization", "")[7:])
         ops = get_ctx().ops
         full_name = make_bucket_name(user.user_id_prefix, body.name)
+        # The `host-` short-name shape is reserved for workspace-backup buckets:
+        # allowed only when the caller has a workspace record (any state) with
+        # that host id, so generic user buckets can never collide with the
+        # names the backup reapers act on. The check runs on the slugified
+        # short name -- the name the bucket is actually created under -- so
+        # case/punctuation variants (e.g. 'HOST-abc') cannot slip into the
+        # reserved namespace.
+        short_name = slugify_r2_name(body.name)
+        if short_name.startswith(_RESERVED_BUCKET_SHORT_NAME_PREFIX) and not _workspace_record_exists(
+            owner_user_id, short_name
+        ):
+            raise R2ReservedBucketNameError(short_name)
         owned = _list_owned_buckets(ops, user.user_id_prefix)
         if any(b.get("name") == full_name for b in owned):
             raise R2BucketExistsError(full_name)
@@ -4848,7 +4907,12 @@ def get_bucket_endpoint(request: Request, name: str) -> dict[str, object]:
 
 @web_app.delete("/buckets/{name}")
 def delete_bucket_endpoint(request: Request, name: str) -> dict[str, str]:
-    """Destroy one of the caller's buckets (refuses non-empty) and cascade-revoke its keys."""
+    """Destroy one of the caller's buckets (refuses non-empty) and cascade-revoke its keys.
+
+    A workspace-backup bucket (`host-<hex>` short name) whose workspace record
+    is still ACTIVE is refused -- tombstone-first is enforced server-side so a
+    live workspace's backups can never be deleted.
+    """
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
         user = require_user_auth(auth)
@@ -4856,6 +4920,12 @@ def delete_bucket_endpoint(request: Request, name: str) -> dict[str, str]:
         ops = get_ctx().ops
         full_name = make_bucket_name(user.user_id_prefix, name)
         verify_bucket_ownership(full_name, user.user_id_prefix)
+        # The interlock runs on the slugified short name -- the name the
+        # bucket is actually deleted under -- so case variants of the path
+        # parameter cannot bypass it.
+        short_name = slugify_r2_name(name)
+        if WORKSPACE_BACKUP_SHORT_NAME_RE.match(short_name) and _workspace_record_is_active(owner_user_id, short_name):
+            raise R2BucketActiveWorkspaceError(full_name, short_name)
         ops.delete_bucket(full_name)
         revoked = get_key_store().delete_keys_for_bucket(owner_user_id, full_name)
         for row in revoked:
@@ -5366,6 +5436,14 @@ class WorkspaceRecordModel(BaseModel):
     revision: int = Field(ge=1, description="Per-row monotonic revision; PUT is CAS on this")
     created_at: str = Field(default="", description="Server timestamp (response only)")
     updated_at: str = Field(default="", description="Server timestamp (response only)")
+    destroyed_at: str | None = Field(
+        default=None,
+        description=(
+            "Server tombstone stamp (response only): set on the transition to 'destroyed', kept across "
+            "destroyed-state updates, cleared on resurrection. Client-sent values are ignored -- the "
+            "store derives it from state so the backup reapers age against the server's clock."
+        ),
+    )
 
 
 class AccountKeyBundleModel(BaseModel):
@@ -5398,7 +5476,7 @@ class SyncStoreConsistencyError(RuntimeError):
 
 _WORKSPACE_RECORD_COLUMNS = (
     "host_id, agent_id, display_name, color, provider_kind, hosting_device_id, device_label, "
-    "state, restored_from_host_id, encrypted_secrets, revision, created_at, updated_at"
+    "state, restored_from_host_id, encrypted_secrets, revision, created_at, updated_at, destroyed_at"
 )
 
 # Must match the index name in migrations/013_workspace_sync.sql; used to tell
@@ -5424,6 +5502,7 @@ def _workspace_record_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
         "revision": row[10],
         "created_at": str(row[11]) if row[11] is not None else "",
         "updated_at": str(row[12]) if row[12] is not None else "",
+        "destroyed_at": str(row[13]) if row[13] is not None else None,
     }
 
 
@@ -5437,6 +5516,13 @@ class SyncStore(Protocol):
     def get_bundle(self, user_id: str) -> dict[str, Any] | None: ...
     def put_bundle(self, user_id: str, bundle: dict[str, Any]) -> None: ...
     def delete_bundle(self, user_id: str) -> None: ...
+    def list_destroyed_records_before(self, cutoff: datetime) -> list[dict[str, Any]]:
+        """List destroyed records whose destroyed_at is before ``cutoff`` (the reaper's candidates)."""
+        ...
+
+    def any_record_references_backup_bucket(self, user_id_prefix: str, host_id: str) -> bool:
+        """Whether any record (any state, any user with this prefix) references ``host_id``."""
+        ...
 
 
 class PostgresSyncStore:
@@ -5488,12 +5574,17 @@ class PostgresSyncStore:
                     encrypted = record["encrypted_secrets"]
                     encrypted_bytes = psycopg2.Binary(encrypted) if encrypted is not None else None
                     try:
+                        # The server stamps destroyed_at itself (authoritative
+                        # clock): set on the transition into 'destroyed', kept
+                        # across destroyed-state updates, cleared on
+                        # resurrection to 'active'. Clients never send it.
                         if existing is None:
                             cur.execute(
                                 "INSERT INTO workspace_records (user_id, host_id, agent_id, display_name, color, "
                                 "provider_kind, hosting_device_id, device_label, state, restored_from_host_id, "
-                                "encrypted_secrets, revision) "
-                                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                                "encrypted_secrets, revision, destroyed_at) "
+                                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+                                "CASE WHEN %s = 'destroyed' THEN NOW() END) "
                                 f"RETURNING {_WORKSPACE_RECORD_COLUMNS}",
                                 (
                                     user_id,
@@ -5508,6 +5599,7 @@ class PostgresSyncStore:
                                     record["restored_from_host_id"],
                                     encrypted_bytes,
                                     record["revision"],
+                                    record["state"],
                                 ),
                             )
                         else:
@@ -5518,7 +5610,8 @@ class PostgresSyncStore:
                                 "UPDATE workspace_records SET agent_id = %s, display_name = %s, color = %s, "
                                 "provider_kind = %s, hosting_device_id = %s, device_label = %s, state = %s, "
                                 "restored_from_host_id = %s, encrypted_secrets = %s, "
-                                "revision = %s, updated_at = NOW() "
+                                "revision = %s, updated_at = NOW(), "
+                                "destroyed_at = CASE WHEN %s = 'destroyed' THEN COALESCE(destroyed_at, NOW()) END "
                                 "WHERE user_id = %s AND host_id = %s "
                                 f"RETURNING {_WORKSPACE_RECORD_COLUMNS}",
                                 (
@@ -5532,6 +5625,7 @@ class PostgresSyncStore:
                                     record["restored_from_host_id"],
                                     encrypted_bytes,
                                     record["revision"],
+                                    record["state"],
                                     user_id,
                                     record["host_id"],
                                 ),
@@ -5641,10 +5735,97 @@ class PostgresSyncStore:
         finally:
             conn.close()
 
+    def list_destroyed_records_before(self, cutoff: datetime) -> list[dict[str, Any]]:
+        conn = _get_pool_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT user_id, host_id, destroyed_at FROM workspace_records "
+                    "WHERE state = 'destroyed' AND destroyed_at IS NOT NULL AND destroyed_at < %s "
+                    "ORDER BY destroyed_at",
+                    (cutoff,),
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [{"user_id": row[0], "host_id": row[1], "destroyed_at": row[2]} for row in rows]
+
+    def any_record_references_backup_bucket(self, user_id_prefix: str, host_id: str) -> bool:
+        # The bucket name carries only the 16-hex user-id prefix, so the match
+        # re-derives the prefix from user_id exactly as derive_user_id_prefix does.
+        conn = _get_pool_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM workspace_records "
+                    "WHERE host_id = %s AND SUBSTRING(REPLACE(user_id, '-', ''), 1, 16) = %s LIMIT 1",
+                    (host_id, user_id_prefix),
+                )
+                return cur.fetchone() is not None
+        finally:
+            conn.close()
+
+
+class OrphanBucketStore(Protocol):
+    """First-seen stamps for workspace-backup buckets no record references (the reaper's orphan clock)."""
+
+    def get_first_seen(self, bucket_name: str) -> datetime | None: ...
+    def get_or_record_first_seen(self, bucket_name: str) -> datetime: ...
+    def delete_stamp(self, bucket_name: str) -> None: ...
+
+
+class PostgresOrphanBucketStore:
+    """OrphanBucketStore backed by the connector's Neon DB (orphan_backup_buckets table)."""
+
+    def get_first_seen(self, bucket_name: str) -> datetime | None:
+        conn = _get_pool_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT first_seen_orphaned_at FROM orphan_backup_buckets WHERE bucket_name = %s",
+                    (bucket_name,),
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        return row[0] if row is not None else None
+
+    def get_or_record_first_seen(self, bucket_name: str) -> datetime:
+        conn = _get_pool_db_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO orphan_backup_buckets (bucket_name) VALUES (%s) "
+                        "ON CONFLICT (bucket_name) DO UPDATE SET bucket_name = EXCLUDED.bucket_name "
+                        "RETURNING first_seen_orphaned_at",
+                        (bucket_name,),
+                    )
+                    row = cur.fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            raise SyncStoreConsistencyError(f"orphan stamp upsert for {bucket_name} returned no row")
+        return row[0]
+
+    def delete_stamp(self, bucket_name: str) -> None:
+        conn = _get_pool_db_connection()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM orphan_backup_buckets WHERE bucket_name = %s", (bucket_name,))
+        finally:
+            conn.close()
+
 
 @functools.cache
 def get_sync_store() -> SyncStore:
     return PostgresSyncStore()
+
+
+@functools.cache
+def get_orphan_bucket_store() -> OrphanBucketStore:
+    return PostgresOrphanBucketStore()
 
 
 def _decode_size_capped_base64(field_name: str, encoded: str, max_bytes: int) -> bytes:
@@ -5993,6 +6174,216 @@ def admin_set_account_quota(request: Request, email: str, body: AdminSetQuotaReq
             upsert_litellm_user_budget(entitlements.user_id, float(value))
         get_entitlements_store().update_entitlements(entitlements.user_id, {body.entitlement: value})
         return {"status": "updated", "entitlement": body.entitlement, "value": value}
+
+
+# ---------------------------------------------------------------------------
+# Destroyed-workspace backup retention reaper
+#
+# The server-side backstop for the 30-day backup retention policy: destroyed
+# workspace records past the window lose their backup bucket and then the
+# record itself; workspace-backup buckets no record references at all
+# (orphans) age from a first-seen stamp and are then reaped too. Emptying is
+# bounded per pass and resumable -- a partially-emptied bucket continues on
+# the next pass, and the bucket + record deletion lands on the pass that
+# finishes -- so a single cron invocation never runs long. The client-side
+# reaper in minds does the same work faster where a client is running; every
+# step here is idempotent so the two never conflict.
+# ---------------------------------------------------------------------------
+
+# Per-pass work budgets: how many destroyed-record candidates to process and
+# how many R2 objects to delete in total (across all buckets) in one pass.
+_REAP_RECORD_BUDGET_PER_PASS: Final[int] = 25
+_REAP_OBJECT_BUDGET_PER_PASS: Final[int] = 2000
+_REAP_LIST_PAGE_SIZE: Final[int] = 500
+
+
+def _revoke_bucket_keys_any_owner(ops: CloudflareOps, key_store: KeyStore, bucket_name: str) -> int:
+    """Delete + best-effort-revoke every recorded key for a bucket, regardless of owner."""
+    revoked_count = 0
+    for row in key_store.list_all_keys():
+        if row.get("bucket_name") != bucket_name:
+            continue
+        key_store.delete_key(str(row["access_key_id"]))
+        _best_effort_revoke_token(ops, str(row["access_key_id"]))
+        revoked_count += 1
+    return revoked_count
+
+
+def _reap_bucket_bounded(
+    ops: CloudflareOps,
+    key_store: KeyStore,
+    bucket_name: str,
+    object_budget: int,
+    # ("deleted" | "partial" | "missing", objects_deleted)
+) -> tuple[str, int]:
+    """Empty a bucket within ``object_budget`` deletions and delete it when empty.
+
+    Returns "partial" when the budget ran out before the bucket was empty (the
+    next pass continues), "missing" when the bucket does not exist.
+    """
+    objects_deleted = 0
+    try:
+        keys = ops.list_bucket_object_keys(bucket_name, _REAP_LIST_PAGE_SIZE)
+    except R2BucketNotFoundError:
+        return "missing", objects_deleted
+    while keys:
+        for key in keys:
+            if objects_deleted >= object_budget:
+                return "partial", objects_deleted
+            ops.delete_bucket_object(bucket_name, key)
+            objects_deleted += 1
+        try:
+            keys = ops.list_bucket_object_keys(bucket_name, _REAP_LIST_PAGE_SIZE)
+        except R2BucketNotFoundError:
+            return "missing", objects_deleted
+    try:
+        ops.delete_bucket(bucket_name)
+    except R2BucketNotFoundError:
+        return "missing", objects_deleted
+    _revoke_bucket_keys_any_owner(ops, key_store, bucket_name)
+    return "deleted", objects_deleted
+
+
+def run_backup_retention_reap(
+    ops: CloudflareOps,
+    sync_store: SyncStore,
+    key_store: KeyStore,
+    orphan_store: OrphanBucketStore,
+    window_seconds: float = DESTROYED_WORKSPACE_BACKUP_RETENTION_SECONDS,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """One reap pass: destroyed records past the window, then orphan buckets past their stamp.
+
+    ``dry_run`` reports the candidate list without deleting anything (and
+    without writing orphan stamps).
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(seconds=window_seconds)
+    counters = {
+        "records_reaped": 0,
+        "orphan_buckets_reaped": 0,
+        "buckets_deleted": 0,
+        "buckets_partially_emptied": 0,
+        "objects_deleted": 0,
+    }
+    candidates: list[dict[str, Any]] = []
+    object_budget_left = _REAP_OBJECT_BUDGET_PER_PASS
+
+    # Phase 1: destroyed records past the window. Bucket first (strict order);
+    # the record is deleted only once its bucket is gone, so a failed or
+    # partial bucket delete leaves the record for the next pass.
+    for record in sync_store.list_destroyed_records_before(cutoff)[:_REAP_RECORD_BUDGET_PER_PASS]:
+        user_id = str(record["user_id"])
+        host_id = str(record["host_id"])
+        # Only a host id in the reserved workspace-backup shape names a bucket
+        # the reaper may touch. Host ids are client-supplied strings, so a
+        # non-conforming id could collide with a generic user bucket's name;
+        # such a record is reaped without any bucket work.
+        bucket_name = (
+            f"{bucket_owner_prefix(derive_user_id_prefix(user_id))}{host_id}"
+            if WORKSPACE_BACKUP_SHORT_NAME_RE.match(host_id)
+            else None
+        )
+        if dry_run:
+            candidates.append(
+                {
+                    "kind": "record",
+                    "host_id": host_id,
+                    "bucket_name": bucket_name,
+                    "destroyed_at": str(record["destroyed_at"]),
+                    "age_seconds": (now - record["destroyed_at"]).total_seconds(),
+                }
+            )
+            continue
+        if object_budget_left <= 0:
+            break
+        if bucket_name is not None:
+            outcome, objects_deleted = _reap_bucket_bounded(ops, key_store, bucket_name, object_budget_left)
+            object_budget_left -= objects_deleted
+            counters["objects_deleted"] += objects_deleted
+            if outcome == "partial":
+                counters["buckets_partially_emptied"] += 1
+                continue
+            if outcome == "deleted":
+                counters["buckets_deleted"] += 1
+            orphan_store.delete_stamp(bucket_name)
+        sync_store.delete_record(user_id, host_id)
+        counters["records_reaped"] += 1
+
+    # Phase 2: workspace-backup buckets no record references. First sighting
+    # stamps the orphan clock; reap once the stamp ages past the window.
+    for bucket in ops.list_buckets(name_contains=f"{_R2_BUCKET_NAME_SEP}host-"):
+        bucket_name = str(bucket.get("name", ""))
+        parsed = parse_workspace_backup_bucket_name(bucket_name)
+        if parsed is None:
+            continue
+        user_id_prefix, host_id = parsed
+        if sync_store.any_record_references_backup_bucket(user_id_prefix, host_id):
+            if not dry_run:
+                orphan_store.delete_stamp(bucket_name)
+            continue
+        if dry_run:
+            first_seen = orphan_store.get_first_seen(bucket_name)
+            candidates.append(
+                {
+                    "kind": "orphan",
+                    "bucket_name": bucket_name,
+                    "first_seen_orphaned_at": str(first_seen) if first_seen is not None else None,
+                    "age_seconds": (now - first_seen).total_seconds() if first_seen is not None else None,
+                }
+            )
+            continue
+        first_seen = orphan_store.get_or_record_first_seen(bucket_name)
+        if first_seen >= cutoff:
+            continue
+        if object_budget_left <= 0:
+            break
+        outcome, objects_deleted = _reap_bucket_bounded(ops, key_store, bucket_name, object_budget_left)
+        object_budget_left -= objects_deleted
+        counters["objects_deleted"] += objects_deleted
+        if outcome == "partial":
+            counters["buckets_partially_emptied"] += 1
+            continue
+        if outcome == "deleted":
+            counters["buckets_deleted"] += 1
+        orphan_store.delete_stamp(bucket_name)
+        counters["orphan_buckets_reaped"] += 1
+
+    if dry_run:
+        return {"dry_run": True, "window_seconds": window_seconds, "candidates": candidates}
+    return counters
+
+
+@web_app.get("/policies/destroyed-workspace-backups")
+def destroyed_workspace_backup_policy_endpoint() -> dict[str, float]:
+    """The backup retention policy for destroyed workspaces (public; the value is not sensitive)."""
+    return {"retention_seconds": DESTROYED_WORKSPACE_BACKUP_RETENTION_SECONDS}
+
+
+@web_app.post("/admin/sweep/backup-retention")
+def admin_run_backup_retention_reap(
+    request: Request, dry_run: bool = False, window_seconds: float | None = None
+) -> dict[str, object]:
+    """Run one backup-retention reap pass on demand (operator tool + deployment tests).
+
+    Authenticated by the fixed operator admin key (``MINDS_ADMIN_KEY``).
+    ``dry_run=1`` returns the candidate list without deleting anything;
+    ``window_seconds`` overrides the retention window (admin-only, e.g. 0 to
+    reap fresh tombstones in a deployment test).
+    """
+    with handle_endpoint_errors():
+        require_admin_key(request)
+        result = run_backup_retention_reap(
+            get_ctx().ops,
+            get_sync_store(),
+            get_key_store(),
+            get_orphan_bucket_store(),
+            window_seconds=(
+                window_seconds if window_seconds is not None else DESTROYED_WORKSPACE_BACKUP_RETENTION_SECONDS
+            ),
+            dry_run=dry_run,
+        )
+        return {"status": "completed", "result": result}
 
 
 @web_app.post("/admin/sweep/r2")
@@ -6589,19 +6980,8 @@ _MIN_CONTAINERS = int(os.environ.get("MINDS_CONNECTOR_MIN_CONTAINERS", "0"))
 # be > 0, so 0 is normalized to ``None`` at the call site below.
 _SCALEDOWN_WINDOW = int(os.environ.get("MINDS_CONNECTOR_SCALEDOWN_WINDOW", "0"))
 
-# boto3, imbue-common (frozen/mutable model bases), and loguru are import-time
-# dependencies of the apt_mirror module app.py imports above; the published
-# imbue-common matches the workspace version.
 image = modal.Image.debian_slim().pip_install(
-    "boto3",
-    "fastapi[standard]",
-    "httpx",
-    "imbue-common",
-    "loguru",
-    "paramiko",
-    "psycopg2-binary",
-    "supertokens-python",
-    "tenacity",
+    "fastapi[standard]", "httpx", "supertokens-python", "psycopg2-binary", "paramiko", "tenacity"
 )
 app = modal.App(name=f"rsc-{_DEPLOY_ENV}", image=image)
 
@@ -6803,4 +7183,24 @@ def r2_quota_sweep() -> dict[str, int]:
     _init_supertokens_once()
     counters = run_r2_quota_sweep(get_ctx().ops, get_key_store(), get_entitlements_store(), get_grant_store())
     logger.info("R2 quota sweep done: %s", counters)
+    return counters
+
+
+@app.function(
+    name="backup_retention_reap",
+    secrets=_connector_secrets(),
+    # Hourly destroyed-workspace backup reap, offset from the other crons.
+    # Work is bounded per pass (record + object budgets) and resumable, so a
+    # single invocation never approaches the timeout.
+    schedule=modal.Cron("15 * * * *"),
+    timeout=900,
+)
+def backup_retention_reap() -> dict[str, int]:
+    counters = run_backup_retention_reap(
+        get_ctx().ops,
+        get_sync_store(),
+        get_key_store(),
+        get_orphan_bucket_store(),
+    )
+    logger.info("Backup retention reap done: %s", counters)
     return counters

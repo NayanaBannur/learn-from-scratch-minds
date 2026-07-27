@@ -6,6 +6,8 @@ import json
 import secrets
 import uuid
 from collections.abc import Iterator
+from datetime import datetime
+from datetime import timezone
 from types import SimpleNamespace
 from typing import Any
 from typing import Final
@@ -242,6 +244,16 @@ class FakeCloudflareOps:
             raise R2BucketNotEmptyError(name)
         del self.buckets[name]
         self.bucket_objects.pop(name, None)
+
+    def list_bucket_object_keys(self, bucket_name: str, limit: int) -> list[str]:
+        if bucket_name not in self.buckets:
+            raise R2BucketNotFoundError(bucket_name)
+        return list(self.bucket_objects.get(bucket_name, []))[:limit]
+
+    def delete_bucket_object(self, bucket_name: str, key: str) -> None:
+        objects = self.bucket_objects.get(bucket_name)
+        if objects is not None and key in objects:
+            objects.remove(key)
 
     def create_bucket_token(self, bucket_name: str, access: str, token_name: str) -> dict[str, Any]:
         token_id = f"r2tok-{self._next_r2_token_id}"
@@ -1300,6 +1312,43 @@ class FakeCursor:
                 if not (row["user_id"] == user_id and row["host_id"] == record_host_id)
             ]
 
+        elif query_lower.startswith("select 1 from workspace_records") and "substring" in query_lower:
+            record_host_id, user_id_prefix = params
+            for row in self._backend.sync_record_rows:
+                if row["host_id"] == record_host_id and row["user_id"].replace("-", "")[:16] == user_id_prefix:
+                    self._results = [(1,)]
+                    break
+
+        elif query_lower.startswith("select 1 from workspace_records") and "state = 'active'" in query_lower:
+            active_row = self._backend.find_sync_record(params[0], params[1])
+            if active_row is not None and active_row["state"] == "active":
+                self._results = [(1,)]
+
+        elif query_lower.startswith("select 1 from workspace_records"):
+            if self._backend.find_sync_record(params[0], params[1]) is not None:
+                self._results = [(1,)]
+
+        elif query_lower.startswith("select user_id, host_id, destroyed_at from workspace_records"):
+            cutoff = params[0]
+            reapable = [
+                (row["user_id"], row["host_id"], row["destroyed_at"])
+                for row in self._backend.sync_record_rows
+                if row["state"] == "destroyed" and row.get("destroyed_at") is not None and row["destroyed_at"] < cutoff
+            ]
+            self._results = sorted(reapable, key=lambda reap_row: reap_row[2])
+
+        elif query_lower.startswith("insert into orphan_backup_buckets"):
+            stamp = self._backend.orphan_stamps.setdefault(params[0], datetime.now(timezone.utc))
+            self._results = [(stamp,)]
+
+        elif query_lower.startswith("select first_seen_orphaned_at from orphan_backup_buckets"):
+            existing_stamp = self._backend.orphan_stamps.get(params[0])
+            if existing_stamp is not None:
+                self._results = [(existing_stamp,)]
+
+        elif query_lower.startswith("delete from orphan_backup_buckets"):
+            self._backend.orphan_stamps.pop(params[0], None)
+
         elif query_lower.startswith("select") and "from account_key_bundles" in query_lower:
             bundle = self._backend.sync_bundle_by_user.get(params[0])
             if bundle is not None:
@@ -1408,6 +1457,9 @@ class FakePoolBackend:
     # When true, workspace_records UPDATEs return no row, simulating the
     # RETURNING invariant breaking.
     sync_update_returns_no_row: bool
+    # Orphan-bucket first-seen stamps (bucket_name -> datetime), mirroring the
+    # orphan_backup_buckets table.
+    orphan_stamps: dict[str, datetime]
 
     def add_paid_domain(self, domain: str, is_paid: bool = True) -> None:
         """Seed a paid-domains row (lowercased), defaulting to active."""
@@ -1475,7 +1527,7 @@ class FakePoolBackend:
 
     def sync_record_tuple(self, row: dict[str, Any]) -> tuple[Any, ...]:
         """Project a stored row into the SELECT column order PostgresSyncStore uses."""
-        return tuple(row[name] for name in _WORKSPACE_RECORD_COLUMN_NAMES)
+        return tuple(row.get(name) for name in _WORKSPACE_RECORD_COLUMN_NAMES)
 
     def check_one_active_sync_record_per_agent(self, user_id: str, host_id: str, agent_id: str, state: str) -> None:
         """Enforce the partial unique index on (user_id, agent_id) WHERE state = 'active'."""
@@ -1505,6 +1557,8 @@ class FakePoolBackend:
             restored_from_host_id,
             encrypted_secrets,
             revision,
+            # The trailing state param feeds the destroyed_at CASE expression.
+            _state_for_destroyed_at,
         ) = params
         if self.sync_insert_race_winner is not None:
             winner = dict(self.sync_insert_race_winner)
@@ -1531,6 +1585,7 @@ class FakePoolBackend:
             "revision": revision,
             "created_at": _SYNC_ROW_CREATED_AT,
             "updated_at": _SYNC_ROW_CREATED_AT,
+            "destroyed_at": datetime.now(timezone.utc) if state == "destroyed" else None,
         }
         self.sync_record_rows.append(row)
         return row
@@ -1548,6 +1603,8 @@ class FakePoolBackend:
             restored_from_host_id,
             encrypted_secrets,
             revision,
+            # The extra state param feeds the destroyed_at CASE expression.
+            _state_for_destroyed_at,
             user_id,
             host_id,
         ) = params
@@ -1557,6 +1614,9 @@ class FakePoolBackend:
         if row is None:
             return None
         self.check_one_active_sync_record_per_agent(user_id, host_id, agent_id, state)
+        # Mirror the SQL CASE: stamp on the destroyed transition (keeping an
+        # existing stamp), clear on resurrection to active.
+        destroyed_at = (row.get("destroyed_at") or datetime.now(timezone.utc)) if state == "destroyed" else None
         row.update(
             agent_id=agent_id,
             display_name=display_name,
@@ -1569,6 +1629,7 @@ class FakePoolBackend:
             encrypted_secrets=_adapted_bytes(encrypted_secrets),
             revision=revision,
             updated_at=_SYNC_ROW_UPDATED_AT,
+            destroyed_at=destroyed_at,
         )
         return row
 
@@ -1713,6 +1774,7 @@ def make_fake_pool_backend() -> FakePoolBackend:
     backend.sync_bundle_by_user = {}
     backend.sync_insert_race_winner = None
     backend.sync_update_returns_no_row = False
+    backend.orphan_stamps = {}
     return backend
 
 
@@ -1739,6 +1801,8 @@ class InMemorySyncStore:
         encoded["encrypted_secrets"] = (
             base64.b64encode(secrets_bytes).decode("ascii") if secrets_bytes is not None else None
         )
+        destroyed_at = record.get("destroyed_at")
+        encoded["destroyed_at"] = str(destroyed_at) if destroyed_at is not None else None
         return encoded
 
     def list_records(self, user_id: str) -> list[dict[str, Any]]:
@@ -1760,11 +1824,32 @@ class InMemorySyncStore:
         stored = dict(record)
         stored["created_at"] = existing["created_at"] if existing is not None else self._next_timestamp()
         stored["updated_at"] = self._next_timestamp()
+        # Mirror the server-side destroyed_at stamping: set on the destroyed
+        # transition (keeping an existing stamp), cleared on resurrection.
+        prior_destroyed_at = existing.get("destroyed_at") if existing is not None else None
+        stored["destroyed_at"] = (
+            (prior_destroyed_at or datetime.now(timezone.utc)) if record["state"] == "destroyed" else None
+        )
         self.records_by_key[key] = stored
         return self._encode_secrets(stored)
 
     def delete_record(self, user_id: str, host_id: str) -> None:
         self.records_by_key.pop((user_id, host_id), None)
+
+    def list_destroyed_records_before(self, cutoff: datetime) -> list[dict[str, Any]]:
+        rows = [
+            {"user_id": uid, "host_id": host_id, "destroyed_at": record["destroyed_at"]}
+            for (uid, host_id), record in self.records_by_key.items()
+            if record["state"] == "destroyed"
+            and record.get("destroyed_at") is not None
+            and record["destroyed_at"] < cutoff
+        ]
+        return sorted(rows, key=lambda row: row["destroyed_at"])
+
+    def any_record_references_backup_bucket(self, user_id_prefix: str, host_id: str) -> bool:
+        return any(
+            hid == host_id and uid.replace("-", "")[:16] == user_id_prefix for (uid, hid) in self.records_by_key
+        )
 
     def scrub_secrets(self, user_id: str) -> int:
         scrubbed = 0
@@ -1796,6 +1881,27 @@ class InMemorySyncStore:
 def make_fake_sync_store() -> InMemorySyncStore:
     """Construct an empty in-memory SyncStore for tests."""
     return InMemorySyncStore()
+
+
+class InMemoryOrphanBucketStore:
+    """In-memory OrphanBucketStore for testing the backup-retention reaper."""
+
+    def __init__(self) -> None:
+        self.stamps_by_bucket: dict[str, datetime] = {}
+
+    def get_first_seen(self, bucket_name: str) -> datetime | None:
+        return self.stamps_by_bucket.get(bucket_name)
+
+    def get_or_record_first_seen(self, bucket_name: str) -> datetime:
+        return self.stamps_by_bucket.setdefault(bucket_name, datetime.now(timezone.utc))
+
+    def delete_stamp(self, bucket_name: str) -> None:
+        self.stamps_by_bucket.pop(bucket_name, None)
+
+
+def make_fake_orphan_bucket_store() -> InMemoryOrphanBucketStore:
+    """Construct an empty in-memory OrphanBucketStore for tests."""
+    return InMemoryOrphanBucketStore()
 
 
 # ---------------------------------------------------------------------------

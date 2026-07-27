@@ -54,6 +54,53 @@ jobs:
       - name: Check changelog entries
         run: python -m scripts.check_changelog_entries
 
+  # apt mirror Worker tests (vitest inside workerd). Runs on the orchestrator
+  # (not offload) because it is a node/workerd toolchain, and only when the
+  # worker actually changed -- the diff needs the real base ref, like
+  # check-changelog above.
+  test-apt-mirror-worker:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Fetch base branch and deepen HEAD for the path diff
+        run: |
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+            git fetch --no-tags --unshallow origin "$(git rev-parse HEAD)"
+          fi
+          git fetch --no-tags origin \
+            "+refs/heads/${GITHUB_BASE_REF}:refs/remotes/origin/${GITHUB_BASE_REF}"
+
+      - name: Check whether the worker changed
+        id: worker-diff
+        run: |
+          if git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" -- apps/apt_mirror/worker | grep -q .; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: setup node
+        if: steps.worker-diff.outputs.changed == 'true'
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24.15.0'
+
+      - name: setup pnpm
+        if: steps.worker-diff.outputs.changed == 'true'
+        run: |
+          npm install -g pnpm@10.33.4
+          pnpm --version
+
+      - name: Install just
+        if: steps.worker-diff.outputs.changed == 'true'
+        uses: extractions/setup-just@v4
+
+      - name: Run worker typecheck and tests
+        if: steps.worker-diff.outputs.changed == 'true'
+        run: just test-apt-mirror-worker
+
   # Unit + integration tests via offload on Modal
   test-offload:
     runs-on: ubuntu-latest
