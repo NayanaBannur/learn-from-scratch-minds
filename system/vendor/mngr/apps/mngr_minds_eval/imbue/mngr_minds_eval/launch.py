@@ -1,9 +1,9 @@
-"""Launch an eval batch: prepare one FCT clone per case, then create one workspace per case.
+"""Launch an eval batch: prepare one template (dwt) clone per case, then create one workspace per case.
 
-Each case's clone carries a system/scripts/test_case_metadata.json (scripts/ on pre-restructure
-template branches) with the R2 target, the case's restic repo + password, and the scoped AWS creds;
-backup_provider is configure_later and the in-sandbox worker drives restic itself. The run
-self-completes and everything is retrievable from R2.
+Each case's clone carries a system/services/eval_worker/test_case_metadata.json with the R2 target,
+the case's restic repo + password, and the scoped AWS creds; backup_provider is configure_later and
+the in-sandbox worker drives restic itself. The run self-completes and everything is retrievable
+from R2.
 """
 
 from __future__ import annotations
@@ -25,11 +25,11 @@ from imbue.mngr_minds_eval import minds_client
 from imbue.mngr_minds_eval import s3_store
 from imbue.mngr_minds_eval import workspace
 
-# The forever-claude-template (workspace template) each eval case is cloned from. The default
-# branch carries the eval worker (eval_responder + config.json gating); a branch WITHOUT it won't
-# auto-run the conversation or snapshot. Override with --fct-repo / --fct-branch.
-DEFAULT_FCT_REPO = "https://github.com/imbue-ai/default-workspace-template.git"
-DEFAULT_FCT_BRANCH = "minds-eval-autosend"
+# The default-workspace-template (dwt) each eval case is cloned from. The branch must carry the
+# eval worker (system/services/eval_worker + its metadata gating); a branch WITHOUT it won't
+# auto-run the conversation or snapshot. Override with the dwt_repo / dwt_branch config keys.
+DEFAULT_DWT_REPO = "https://github.com/imbue-ai/default-workspace-template.git"
+DEFAULT_DWT_BRANCH = "main"
 CLONES_DIR = Path("/work/clones")
 BASE_DIR = Path("/work/eval-base")
 BOX_MNGR = Path("/work/mngr")
@@ -153,26 +153,15 @@ def validate_name(name: str) -> str:
     return name
 
 
-def _ensure_base(fct_repo: str, fct_branch: str) -> None:
+def _ensure_base(dwt_repo: str, dwt_branch: str) -> None:
     if BASE_DIR.exists():
         shutil.rmtree(BASE_DIR)
-    print(">> cloning {}@{} (fresh tip)".format(fct_repo, fct_branch), flush=True)
-    _sh("git", "clone", "--branch", fct_branch, fct_repo, str(BASE_DIR))
-
-
-def _workspace_system_dir(clone: Path) -> Path:
-    """The directory holding the template's tooling tree.
-
-    The template repo's restructure moved everything code-ish under system/
-    (vendor/mngr -> system/vendor/mngr, scripts/ -> system/scripts/). Resolve
-    against whichever layout this clone has, so the harness works across both
-    pre- and post-restructure template branches.
-    """
-    return clone / "system" if (clone / "system").is_dir() else clone
+    print(">> cloning {}@{} (fresh tip)".format(dwt_repo, dwt_branch), flush=True)
+    _sh("git", "clone", "--branch", dwt_branch, dwt_repo, str(BASE_DIR))
 
 
 def _vendor_mngr(clone: Path) -> None:
-    dest = _workspace_system_dir(clone) / "vendor" / "mngr"
+    dest = clone / "system" / "vendor" / "mngr"
     dest.mkdir(parents=True, exist_ok=True)
     args = ["rsync", "-a", "--delete"]
     for pattern in _VENDOR_EXCLUDES:
@@ -219,7 +208,7 @@ def _prepare_clone(case: dict, case_config: dict) -> Path:
         shutil.rmtree(clone)
     _sh("git", "clone", str(BASE_DIR), str(clone))
     _vendor_mngr(clone)
-    (_workspace_system_dir(clone) / "scripts" / "test_case_metadata.json").write_text(
+    (clone / "system" / "services" / "eval_worker" / "test_case_metadata.json").write_text(
         json.dumps(case_config, indent=2)
     )
     _sh("git", "-C", str(clone), "add", "-A")
@@ -245,8 +234,8 @@ def launch_batch(*, name: str, config: dict, anthropic_key: str, port: str) -> d
     bucket = env["MINDS_EVAL_BUCKET"]
 
     eval_name = validate_name(name)
-    fct_repo = config.get("fct_repo", DEFAULT_FCT_REPO)
-    fct_branch = config.get("fct_branch", DEFAULT_FCT_BRANCH)
+    dwt_repo = config.get("dwt_repo", DEFAULT_DWT_REPO)
+    dwt_branch = config.get("dwt_branch", DEFAULT_DWT_BRANCH)
     cases = normalize_cases(config["personas"])
     # The name IS the batch: R2 prefix and Modal env both key on it (uniqueness preflighted on the
     # host before this runs).
@@ -279,7 +268,7 @@ def launch_batch(*, name: str, config: dict, anthropic_key: str, port: str) -> d
     )
 
     CLONES_DIR.mkdir(parents=True, exist_ok=True)
-    _ensure_base(fct_repo, fct_branch)
+    _ensure_base(dwt_repo, dwt_branch)
 
     # Prepare every clone first (git clone + vendor mngr + slot test_case_metadata.json). Local and
     # fast; kept serial for simple output. Everything the in-sandbox worker needs is in the metadata
@@ -319,7 +308,7 @@ def launch_batch(*, name: str, config: dict, anthropic_key: str, port: str) -> d
         try:
             agent_id = workspace.create_workspace(
                 port=port,
-                fct_link=str(clone),
+                dwt_repo=str(clone),
                 name=host_name,
                 backup_provider="configure_later",
                 on_stage=lambda s: live.set(cid, s),

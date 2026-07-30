@@ -72,7 +72,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--config",
         required=True,
         type=Path,
-        help="eval config json: {mngr_branch, fct_branch?, fct_repo?, timeout_seconds?, personas:[...]}",
+        help="eval config json: {mngr_branch, dwt_branch?, dwt_repo?, timeout_seconds?, personas:[...]}",
     )
     p_launch.add_argument("--anthropic-key", default=os.environ.get("ANTHROPIC_API_KEY", ""))
     p_launch.add_argument(
@@ -107,9 +107,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_box = sub.add_parser("box", help="dev utility: boot a desktop box on an mngr branch tip")
     p_box.add_argument("--mngr-branch", required=True)
     p_box.add_argument("--user-id", default="minh", help="Modal env suffix for this box (default: minh)")
-    p_box.add_argument("--dwt-link", default="", help="also create ONE workspace from this template repo/path")
-    p_box.add_argument("--dwt-branch", default="", help="template branch for --dwt-link (blank = repo default)")
-    p_box.add_argument("--workspace-name", default="", help="host name for the --dwt-link workspace (blank = auto)")
+    p_box.add_argument("--dwt-repo", default="", help="also create ONE workspace from this template repo/path")
+    p_box.add_argument("--dwt-branch", default="", help="template branch for --dwt-repo (blank = repo default)")
+    p_box.add_argument("--workspace-name", default="", help="host name for the --dwt-repo workspace (blank = auto)")
     p_box.add_argument(
         "--vendor-box-mngr",
         action="store_true",
@@ -127,7 +127,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="NAME",
-        help="carry this env var from your shell into the --dwt-link workspace (repeatable; errors if unset)",
+        help="carry this env var from your shell into the --dwt-repo workspace (repeatable; errors if unset)",
     )
     return parser
 
@@ -212,31 +212,31 @@ def main() -> None:
 
     if args.command == "box":
         if IN_BOX:
-            # The in-box leg of --dwt-link: find the Minds app's API and create the one workspace.
-            if not args.dwt_link:
+            # The in-box leg of --dwt-repo: find the Minds app's API and create the one workspace.
+            if not args.dwt_repo:
                 parser.error("run `box` from the host, not inside a box")
-            link, branch = args.dwt_link, args.dwt_branch
+            link, branch = args.dwt_repo, args.dwt_branch
             if args.vendor_box_mngr:
                 # The committed vendor/mngr subtree is release-pinned; overwrite it with THIS box's
                 # mngr so the workspace's internal tooling runs the same code --mngr-branch asked for.
-                clone = launch_mod.vendored_clone(args.dwt_link, args.dwt_branch, args.workspace_name or "adhoc")
+                clone = launch_mod.vendored_clone(args.dwt_repo, args.dwt_branch, args.workspace_name or "adhoc")
                 link, branch = str(clone), ""
             try:
                 workspace.create_workspace(
                     port=minds_client.discover_api_port(),
-                    fct_link=link,
-                    fct_branch=branch,
+                    dwt_repo=link,
+                    dwt_branch=branch,
                     name=args.workspace_name,
                 )
             except minds_client.CreateError as exc:
                 sys.exit(str(exc))
             return
-        if args.dwt_link and not os.environ.get("ANTHROPIC_API_KEY"):
-            parser.error("--dwt-link creates an api_key workspace -- set ANTHROPIC_API_KEY")
-        if args.vendor_box_mngr and not args.dwt_link:
-            parser.error("--vendor-box-mngr only makes sense with --dwt-link")
-        if args.workspace_env and not args.dwt_link:
-            parser.error("--workspace-env only makes sense with --dwt-link (there is no workspace otherwise)")
+        if args.dwt_repo and not os.environ.get("ANTHROPIC_API_KEY"):
+            parser.error("--dwt-repo creates an api_key workspace -- set ANTHROPIC_API_KEY")
+        if args.vendor_box_mngr and not args.dwt_repo:
+            parser.error("--vendor-box-mngr only makes sense with --dwt-repo")
+        if args.workspace_env and not args.dwt_repo:
+            parser.error("--workspace-env only makes sense with --dwt-repo (there is no workspace otherwise)")
         sandbox = box_mod.ensure(
             args.mngr_branch,
             user_id=box_mod.sanitize_user_id(args.user_id),
@@ -245,7 +245,7 @@ def main() -> None:
             workspace_env=_resolve_forward_env(args.workspace_env),
         )
         _print_desktop_urls(sandbox)
-        if args.dwt_link:
+        if args.dwt_repo:
             returncode = box_mod.run_in_box(
                 sandbox, sys.argv[1:], {"ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY", "")}
             )

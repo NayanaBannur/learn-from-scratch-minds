@@ -32,8 +32,8 @@ def test_s3_prefixes() -> None:
 def test_launch_case_payload_is_modal_configure_later() -> None:
     # The payload launch builds per case (via workspace.build_payload).
     payload = workspace.build_payload(
-        fct_link="/work/clones/todo",
-        fct_branch="",
+        dwt_repo="/work/clones/todo",
+        dwt_branch="",
         name="EVAL-web1-CASE-todo",
         backup_provider="configure_later",
     )

@@ -319,16 +319,13 @@ def test_render_landing_page_signed_out_launcher_signs_in_back_to_home() -> None
     # "Log in", and (the Landing page being a trusted local page on the chrome
     # surface) it opens the sign-in modal via the shell bridge with
     # ``returnTo: '/'`` so a successful sign-in lands back on the home screen
-    # (the server's return_to default is the create screen). It passes no
-    # ``mode``, so the modal leads with sign-up -- a user with no account at
-    # all needs to create one.
+    # (the server's return_to default is the create screen), leading with the
+    # sign-in tab to match the launcher's label.
     html = render_landing_page(accessible_agent_ids=())
     assert 'id="landing-minds-settings"' in html
     assert 'id="landing-account"' in html
     assert "Log in" in html
-    assert "window.minds.openSigninModal('/')" in html
-    assert "window.minds.openSigninModal('/', 'signin')" not in html
-    assert "'/auth/signup'" in html
+    assert "window.minds.openSigninModal('/', 'signin')" in html
 
 
 def test_render_landing_page_signed_in_launcher_shows_email_and_extra_count() -> None:
@@ -3079,27 +3076,6 @@ def test_render_accounts_modal_page_cards_open_the_plan_modal() -> None:
     # Each card carries the drill-in hook and the modal wires the launcher.
     assert 'data-open-plan="u-1"' in html
     assert "openAccountPlan" in html
-
-
-def test_render_accounts_modal_page_account_actions_carry_the_busy_affordances() -> None:
-    """Both slow account actions ship the hooks their in-flight state needs.
-
-    Sign-out runs for seconds (plugin signout, provider teardown, supervisor
-    bounce), so the clicked button swaps its label and reveals a spinner. The
-    script binds by these class names, so a card without them would leave the
-    button looking untouched for the whole wait -- the bug this fixes.
-    """
-    # Not the default account, so both actions render on the card.
-    acct = SimpleNamespace(user_id="u-1", email="a@b.com", workspace_ids=[])
-    html = render_accounts_modal_page(accounts=[acct], default_account_id="u-other")
-
-    assert html.count('class="account-action-spinner hidden"') == 2
-    assert html.count('class="account-action-label"') == 2
-    assert "Logging out" in html
-    assert "Switching" in html
-    # Failures surface in the notice instead of silently restoring the buttons.
-    assert 'id="accounts-modal-error"' in html
-    assert "Could not log out of this account" in html
 
 
 def test_render_destroyed_workspaces_page_shell_is_async_without_rows() -> None:

@@ -36,10 +36,10 @@ minds-evals launch smoke --config eval-config-small.json
 minds-evals box --mngr-branch main --user-id me
 ```
 
-### box — with a workspace (`--dwt-link`; needs `ANTHROPIC_API_KEY`)
+### box — with a workspace (`--dwt-repo`; needs `ANTHROPIC_API_KEY`)
 ```
 minds-evals box --mngr-branch main --user-id me \
-  --dwt-link https://github.com/imbue-ai/default-workspace-template.git \
+  --dwt-repo https://github.com/imbue-ai/default-workspace-template.git \
   --dwt-branch main --workspace-name ws
 ```
 Add `--vendor-box-mngr` so the workspace's committed `vendor/mngr` is overwritten with the box's mngr
@@ -51,12 +51,12 @@ errors immediately.
 ```
 export FLAG=1
 minds-evals box --mngr-branch b --user-id me --box-env FLAG                        # -> box container (minds app)
-minds-evals box --mngr-branch b --user-id me --dwt-link <repo> --dwt-branch x \
+minds-evals box --mngr-branch b --user-id me --dwt-repo <repo> --dwt-branch x \
     --workspace-env FLAG                                                            # -> the workspace's agent env
 minds-evals launch n --config c.json --box-env FLAG_A --workspace-env FLAG_B        # both, applied to every case
 ```
 - `--box-env NAME` → the box's mngr/minds container. Works on any `--mngr-branch`. (repeatable)
-- `--workspace-env NAME` → each created workspace's host env. Needs `--dwt-link` (there is no
+- `--workspace-env NAME` → each created workspace's host env. Needs `--dwt-repo` (there is no
   workspace otherwise), and the box's mngr must carry the `--pass-host-env` support (a
   `minds-evals-desktop`-based branch). (repeatable)
 - **Reuse caveat:** a box with the same `--user-id` + branch tip is reused with its ORIGINAL env — use
@@ -68,7 +68,6 @@ A reusable template; the batch `<name>` is given on the command line, not in the
 ```json
 {
   "mngr_branch": "minds-evals-desktop",
-  "fct_branch": "minds-eval-autosend",
   "timeout_seconds": 3600,
   "personas": [
     {"id": "todo-app", "persona": "...", "prompts": ["Build me ...", "Sounds good.", "DECIDE_FROM_PERSONA"]}
@@ -76,8 +75,8 @@ A reusable template; the batch `<name>` is given on the command line, not in the
 }
 ```
 - `mngr_branch` — the box's mngr (governs the compute + which minds features the box runs).
-- `fct_branch`/`fct_repo` — optional; default the workspace-template branch carrying the eval worker
-  (`minds-eval-autosend`). Must carry the worker or the sandbox boots but never self-runs.
+- `dwt_branch`/`dwt_repo` — optional; default the default-workspace-template `main` branch, which
+  carries the eval worker. The branch must carry the worker or the sandbox boots but never self-runs.
 - `timeout_seconds` — optional (default 3600 = 1h): per-case wall-clock budget; a run past it self-terminates.
 - Each `prompts` entry is one turn: a **literal** string sent verbatim, or **`DECIDE_FROM_PERSONA`**
   (the worker role-plays the client via the Anthropic API; cannot be the first entry).
@@ -99,5 +98,5 @@ A reusable template; the batch `<name>` is given on the command line, not in the
   cases show `N/A`. Results land in `<case>/case_eval_results.json` + `<batch>/batch_eval_results.json`.
 - Boxes self-terminate after 8h; `stop <name>` kills one early. Modal envs accumulate one per batch —
   wipe with `TERM=dumb uv run python scripts/modal_nuke.py -e <modal_env> --force`.
-- The eval worker (on the FCT `minds-eval-autosend` branch) no-ops unless `system/scripts/test_case_metadata.json`
-  (`scripts/` on pre-restructure template branches) is present, so normal workspaces on that branch are unaffected.
+- The eval worker no-ops unless `system/services/eval_worker/test_case_metadata.json` is present,
+  so normal workspaces are unaffected.

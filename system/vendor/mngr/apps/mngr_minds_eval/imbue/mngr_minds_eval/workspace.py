@@ -1,7 +1,7 @@
 """Create ONE workspace in a running box. The single place that knows the create payload shape;
 used both as the `workspace` utility (ad-hoc) and per-case by `launch`.
 
-fct_link / fct_branch pass through verbatim (a git URL, a local /work/clones/<x> path, empty
+dwt_repo / dwt_branch pass through verbatim (a git URL, a local /work/clones/<x> path, empty
 branch, etc.)."""
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ def _print_stage(stage: str) -> None:
     print("   ... {}".format(stage), flush=True)
 
 
-def build_payload(*, fct_link: str, fct_branch: str, name: str, backup_provider: str) -> dict:
+def build_payload(*, dwt_repo: str, dwt_branch: str, name: str, backup_provider: str) -> dict:
     """Create-form fields. Workspaces are always Modal. Empty branch: a local clone is already on its
     commit, and passing a branch trips mngr's checkout_branch(FETCH_HEAD) on the use-in-place path.
 
@@ -21,8 +21,8 @@ def build_payload(*, fct_link: str, fct_branch: str, name: str, backup_provider:
     modal now, and the eval agent picks up ANTHROPIC_API_KEY from the workspace host env (forwarded
     by the modal template's pass_host_env)."""
     payload = {
-        "git_url": fct_link,
-        "branch": fct_branch,
+        "git_url": dwt_repo,
+        "branch": dwt_branch,
         "launch_mode": "MODAL",
         "backup_provider": backup_provider.upper(),
     }
@@ -34,8 +34,8 @@ def build_payload(*, fct_link: str, fct_branch: str, name: str, backup_provider:
 def create_workspace(
     *,
     port: str,
-    fct_link: str,
-    fct_branch: str = "",
+    dwt_repo: str,
+    dwt_branch: str = "",
     name: str = "",
     backup_provider: str = "configure_later",
     quiet: bool = False,
@@ -45,15 +45,15 @@ def create_workspace(
     failure (callers decide whether to abort or continue). Pass on_stage(caption) to route progress
     (launch's live table does this); else quiet suppresses prints, or it prints its own lines."""
     payload = build_payload(
-        fct_link=fct_link,
-        fct_branch=fct_branch,
+        dwt_repo=dwt_repo,
+        dwt_branch=dwt_branch,
         name=name,
         backup_provider=backup_provider,
     )
     if on_stage is None and not quiet:
         print(
             ">> creating modal workspace {} from {}@{} ...".format(
-                name or "<auto>", fct_link, fct_branch or "<default>"
+                name or "<auto>", dwt_repo, dwt_branch or "<default>"
             ),
             flush=True,
         )
