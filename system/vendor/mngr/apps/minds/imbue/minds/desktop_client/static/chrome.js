@@ -66,6 +66,7 @@
     return (
       pathname === '/'
       || pathname === '/create'
+      || pathname === '/create/inspiration'
       || pathname === '/settings'
       || pathname === '/accounts'
       || pathname === '/_chrome'
@@ -406,6 +407,7 @@
     // No back arrow on the create form: the titlebar home button is the
     // escape (back to the workspace list / welcome splash).
     if (path === '/create') return { kind: 'page', pageLabel: 'New workspace' };
+    if (path === '/create/inspiration') return { kind: 'page', pageLabel: 'New workspace' };
     if (/^\/creating\//.test(path)) return { kind: 'page', pageLabel: 'New workspace' };
     // Browser-mode full-page fallbacks (Electron shows these as modals).
     if (path === '/settings') return { kind: 'page', pageLabel: 'Settings', showBack: true };
@@ -414,7 +416,9 @@
     // No back arrow on the auth pages (browser-mode fallbacks; Electron opens
     // the sign-in modal instead): the titlebar home button is the escape, and
     // the home route bounces back to the splash until an account option is
-    // chosen.
+    // chosen. /auth/signup gets its own crumb so someone who pressed "Sign Up"
+    // is not told they are on a sign-in page.
+    if (path === '/auth/signup') return { kind: 'page', pageLabel: 'Create account' };
     if (/^\/auth(?:\/|$)/.test(path)) return { kind: 'page', pageLabel: 'Sign in' };
     // The welcome splash is the committed first screen: the user must pick
     // sign up / log in / continue without an account, so the home button is

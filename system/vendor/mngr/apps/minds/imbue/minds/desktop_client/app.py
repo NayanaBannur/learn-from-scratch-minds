@@ -82,8 +82,8 @@ from imbue.minds.desktop_client.latchkey.permission_overview import build_worksp
 from imbue.minds.desktop_client.latchkey.permission_overview import disconnect_account
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_all_workspaces
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_file_sharing_for_workspace
-from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_for_all_workspaces
-from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_for_workspace
+from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_account_for_all_workspaces
+from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_account_for_workspace
 from imbue.minds.desktop_client.latchkey.permission_overview import revoke_workspace_verb_for_workspace
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
 from imbue.minds.desktop_client.mind_liveness import get_shutdown_capable_workspace_agent_ids
@@ -116,9 +116,11 @@ from imbue.minds.desktop_client.state import set_state
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.supertokens_routes import create_supertokens_blueprint
 from imbue.minds.desktop_client.supertokens_routes import signout_user_via_plugin
+from imbue.minds.desktop_client.supertokens_routes import wake_chrome_event_streams
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.templates import InspirationWorkspaceRow
 from imbue.minds.desktop_client.templates import RemoteWorkspaceTile
 from imbue.minds.desktop_client.templates import render_account_plan_modal_page
 from imbue.minds.desktop_client.templates import render_account_plan_section
@@ -139,6 +141,7 @@ from imbue.minds.desktop_client.templates import render_help_page
 from imbue.minds.desktop_client.templates import render_inbox_list_fragment
 from imbue.minds.desktop_client.templates import render_inbox_page
 from imbue.minds.desktop_client.templates import render_inbox_unavailable_fragment
+from imbue.minds.desktop_client.templates import render_inspiration_create_page
 from imbue.minds.desktop_client.templates import render_landing_page
 from imbue.minds.desktop_client.templates import render_login_page
 from imbue.minds.desktop_client.templates import render_login_redirect_page
@@ -875,6 +878,27 @@ def _account_launcher_context(session_store: MultiAccountSessionStore | None) ->
     return str(shown.email), len(accounts) - 1
 
 
+def _build_account_launcher_payload(session_store: MultiAccountSessionStore | None) -> dict[str, object]:
+    """The account-identity fields every chrome ``workspaces`` frame carries.
+
+    The home screen's bottom-left launcher is server-rendered from the same
+    ``_account_launcher_context``, but the page stays put across a sign-out /
+    sign-in / default-account switch made in an overlay modal. Carrying the
+    identity on the stream is what lets the launcher re-label itself (and flip
+    ``data-signed-in``, which decides whether clicking it opens Manage Accounts
+    or the sign-in modal) without a reload. ``has_accounts`` is derived from the
+    account list rather than the email so the welcome splash's self-advance
+    keeps its exact "any account at all" meaning.
+    """
+    accounts = session_store.list_accounts() if session_store else []
+    launcher_email, launcher_extra_count = _account_launcher_context(session_store)
+    return {
+        "has_accounts": bool(accounts),
+        "account_email": launcher_email,
+        "extra_account_count": launcher_extra_count,
+    }
+
+
 def _compute_cloud_tile_state(
     backend_resolver: BackendResolverInterface,
     record_store: WorkspaceRecordStore,
@@ -1271,6 +1295,72 @@ def _handle_create_page() -> Response:
     return make_html_response(content=html)
 
 
+def _handle_inspiration_create_page() -> Response:
+    """Show the Create from Inspiration page (GET /create/inspiration).
+
+    The deeplink landing page for an Inspiration link: a chooser between
+    creating a new workspace from the linked repo and adding the Inspiration
+    to an existing workspace (via a copyable ``/use-inspiration`` message and
+    a workspace picker). Without a ``git_url`` there is nothing to show, so
+    the request degrades to the plain create page.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+
+    git_url = request.args.get("git_url", "").strip()
+    if not git_url:
+        return make_redirect_response("/create", status_code=302)
+    branch = request.args.get("branch", "")
+
+    backend_resolver = get_state().backend_resolver
+    session_store: MultiAccountSessionStore | None = get_state().session_store
+    minds_config: MindsConfig | None = get_state().minds_config
+    geo_cache: GeoLocationCache | None = get_state().geo_location_cache
+    accounts = session_store.list_accounts() if session_store else []
+    default_account_id = minds_config.get_default_account_id() if minds_config else None
+    # The advanced settings step's region select uses the same per-provider
+    # region context the create form builds.
+    region_options, region_selected = _build_region_form_context(minds_config, geo_cache)
+
+    # The pickable rows for the add-to-existing flow, mirroring the landing
+    # page's list (which also collects providers/shutdown-capability, hence
+    # the deliberate small duplication). Destroying workspaces are excluded --
+    # there is nothing to paste a message into.
+    paths: WorkspacePaths | None = get_state().api_v1_paths
+    destroying_status_by_agent_id = _resolve_destroying_for_landing(paths, backend_resolver, session_store)
+    liveness_by_agent_id = {
+        aid: state.value for aid, state in compute_mind_liveness_by_agent_id(backend_resolver).items()
+    }
+    workspace_rows = []
+    for aid in backend_resolver.list_active_workspace_ids():
+        if str(aid) in destroying_status_by_agent_id:
+            continue
+        info = backend_resolver.get_agent_display_info(aid)
+        ws_name = backend_resolver.get_workspace_name(aid)
+        name = ws_name if ws_name else (info.agent_name if info else str(aid))
+        workspace_rows.append(
+            InspirationWorkspaceRow(
+                agent_id=str(aid),
+                name=name,
+                accent=_resolved_workspace_color(backend_resolver, aid),
+                liveness=liveness_by_agent_id.get(str(aid), "UNKNOWN"),
+            )
+        )
+
+    html = render_inspiration_create_page(
+        git_url=git_url,
+        branch=branch,
+        accounts=accounts,
+        default_account_id=default_account_id or "",
+        color=_suggested_create_color(backend_resolver),
+        mngr_forward_origin=_get_mngr_forward_origin(),
+        workspace_rows=workspace_rows,
+        region_options_by_launch_mode=region_options,
+        region_selected_by_launch_mode=region_selected,
+    )
+    return make_html_response(content=html)
+
+
 def _retry_pending_create_attempt_record(retry_create_attempt_id: str) -> PendingCreateAttemptRecord | None:
     """Load the pending record a ``/create?retry=<id>`` deep-link points at, if usable.
 
@@ -1627,7 +1717,7 @@ def _handle_chrome_events() -> Response:
             )
             last_destroying_ids = _destroying_agent_ids(paths, backend_resolver)
             last_remote_states = _build_remote_tile_states(backend_resolver, session_store)
-            has_accounts = bool(session_store and session_store.list_accounts())
+            last_account_payload = _build_account_launcher_payload(session_store)
             # The agent ids the shell may restore windows to: live workspaces plus
             # any from the persisted last-good topology not yet re-discovered this
             # session. Lets restore decline to drop a window whose workspace is
@@ -1639,9 +1729,9 @@ def _handle_chrome_events() -> Response:
                         "type": "workspaces",
                         "workspaces": last_workspace_data,
                         "destroying_agent_ids": last_destroying_ids,
-                        "has_accounts": has_accounts,
                         "restorable_workspace_ids": last_restorable_ids,
                         "remote_workspace_states": last_remote_states,
+                        **last_account_payload,
                     }
                 )
             )
@@ -1780,14 +1870,21 @@ def _handle_chrome_events() -> Response:
                 )
                 current_destroying_ids = _destroying_agent_ids(paths, backend_resolver)
                 current_remote_states = _build_remote_tile_states(backend_resolver, session_store)
+                # A sign-in / sign-out / default-account switch changes nothing
+                # about the workspace list, so the account payload is its own
+                # diff term -- otherwise the launcher would keep the label of an
+                # account that is no longer signed in.
+                current_account_payload = _build_account_launcher_payload(session_store)
                 if (
                     current_data != last_workspace_data
                     or current_destroying_ids != last_destroying_ids
                     or current_remote_states != last_remote_states
+                    or current_account_payload != last_account_payload
                 ):
                     last_workspace_data = current_data
                     last_destroying_ids = current_destroying_ids
                     last_remote_states = current_remote_states
+                    last_account_payload = current_account_payload
                     yield "data: {}\n\n".format(
                         json.dumps(
                             {
@@ -1795,6 +1892,7 @@ def _handle_chrome_events() -> Response:
                                 "workspaces": current_data,
                                 "destroying_agent_ids": current_destroying_ids,
                                 "remote_workspace_states": current_remote_states,
+                                **current_account_payload,
                             }
                         )
                     )
@@ -2864,11 +2962,13 @@ def _apply_revoke(revoke: Callable[..., object], **kwargs: Any) -> Response:
 
 
 def _handle_revoke_service_for_workspace() -> Response:
-    """Revoke a predefined service's grants for one workspace (POST /settings/permissions/revoke).
+    """Revoke one connector account's grants for one workspace (POST /settings/permissions/revoke).
 
-    Body: ``{"workspace_agent_id": "...", "service_name": "..."}``. Removes every
-    rule the service owns from that workspace's host permissions file (stored
-    credentials untouched).
+    Body: ``{"workspace_agent_id": "...", "service_name": "...", "account": "..."}``
+    (the unnamed default account is the empty string). Removes the account-scoped
+    rule of every scope the service owns from that workspace's host permissions
+    file, leaving the service's other accounts and the stored credentials
+    untouched.
     """
     prelude = _revoke_prelude()
     if isinstance(prelude, Response):
@@ -2876,38 +2976,40 @@ def _handle_revoke_service_for_workspace() -> Response:
     body, handler = prelude
     workspace_agent_id = str(body.get("workspace_agent_id", ""))
     service_name = str(body.get("service_name", ""))
-    if not workspace_agent_id or not service_name:
-        return _json_error("workspace_agent_id and service_name are required.", status_code=400)
+    if not workspace_agent_id or not service_name or "account" not in body:
+        return _json_error("workspace_agent_id, service_name and account are required.", status_code=400)
     return _apply_revoke(
-        revoke_service_for_workspace,
+        revoke_service_account_for_workspace,
         backend_resolver=get_state().backend_resolver,
         gateway_client=handler.gateway_client,
         services_catalog=handler.services_catalog,
         latchkey=handler.latchkey,
         workspace_agent_id=workspace_agent_id,
         service_name=service_name,
+        account=str(body.get("account", "")),
     )
 
 
 def _handle_revoke_service_for_all_workspaces() -> Response:
-    """Revoke a predefined service's grants across every active workspace (POST /settings/permissions/revoke-all).
+    """Revoke one connector account's grants everywhere (POST /settings/permissions/revoke-all).
 
-    Body: ``{"service_name": "..."}``.
+    Body: ``{"service_name": "...", "account": "..."}``.
     """
     prelude = _revoke_prelude()
     if isinstance(prelude, Response):
         return prelude
     body, handler = prelude
     service_name = str(body.get("service_name", ""))
-    if not service_name:
-        return _json_error("service_name is required.", status_code=400)
+    if not service_name or "account" not in body:
+        return _json_error("service_name and account are required.", status_code=400)
     return _apply_revoke(
-        revoke_service_for_all_workspaces,
+        revoke_service_account_for_all_workspaces,
         backend_resolver=get_state().backend_resolver,
         gateway_client=handler.gateway_client,
         services_catalog=handler.services_catalog,
         latchkey=handler.latchkey,
         service_name=service_name,
+        account=str(body.get("account", "")),
     )
 
 
@@ -3002,10 +3104,11 @@ def _handle_disconnect_connector_account() -> Response:
     """Disconnect one account from a connector service (POST /settings/connectors/disconnect-account).
 
     Body: ``{"service_name": "...", "account": "..."}`` (the default account is the
-    empty string). Clears that account's stored credentials. When it was the
-    service's *last* account, the service's permission grants are now orphaned,
-    so we kick off the "revoke all" cleanup (remove the service's rules from
-    every workspace) in the background and return immediately.
+    empty string). Clears that account's stored credentials and then strips the
+    account's now-inert grants from every workspace, so reconnecting the same
+    account later starts from no permissions rather than silently resurrecting
+    the old ones. The cleanup runs in the background and the route returns
+    immediately.
     """
     prelude = _revoke_prelude()
     if isinstance(prelude, Response):
@@ -3016,52 +3119,56 @@ def _handle_disconnect_connector_account() -> Response:
     if not service_name:
         return _json_error("service_name is required.", status_code=400)
     try:
-        is_last_account = disconnect_account(handler.latchkey, service_name, account)
+        disconnect_account(handler.latchkey, service_name, account)
     except PermissionOverviewError as e:
         return _json_error(str(e), status_code=502)
-    if is_last_account:
-        _revoke_service_for_all_workspaces_in_background(handler, service_name)
+    _revoke_service_account_for_all_workspaces_in_background(handler, service_name, account)
     return make_response(content='{"status": "ok"}', media_type="application/json")
 
 
-def _revoke_service_for_all_workspaces_in_background(
+def _revoke_service_account_for_all_workspaces_in_background(
     handler: LatchkeyPermissionGrantHandler,
     service_name: str,
+    account: str,
 ) -> None:
-    """Fire off ``revoke_service_for_all_workspaces`` on a daemon thread.
+    """Fire off ``revoke_service_account_for_all_workspaces`` on a daemon thread.
 
-    Disconnecting the last account leaves the service's permission grants with no
-    credentials to back them, so we strip those grants from every workspace's
-    host file. This touches one gateway call per active host, so it runs off the
-    request thread to keep the Disconnect click responsive; failures are logged
-    rather than surfaced (the grants are harmless without credentials, and the
-    user can retry via the per-service "Revoke all").
+    A disconnected account's grants have no credentials to back them, so we
+    strip them from every workspace's host file. This touches one gateway call
+    per active host, so it runs off the request thread to keep the Disconnect
+    click responsive; failures are logged rather than surfaced (the grants are
+    inert without credentials, and the user can retry via the account's "Revoke
+    all").
     """
     backend_resolver = get_state().backend_resolver
     threading.Thread(
-        target=_run_revoke_service_for_all_workspaces,
-        args=(backend_resolver, handler, service_name),
+        target=_run_revoke_service_account_for_all_workspaces,
+        args=(backend_resolver, handler, service_name, account),
         name=f"revoke-all-{service_name}",
         daemon=True,
     ).start()
 
 
-def _run_revoke_service_for_all_workspaces(
+def _run_revoke_service_account_for_all_workspaces(
     backend_resolver: BackendResolverInterface,
     handler: LatchkeyPermissionGrantHandler,
     service_name: str,
+    account: str,
 ) -> None:
-    """Body of the background thread spawned by :func:`_revoke_service_for_all_workspaces_in_background`."""
+    """Body of the thread spawned by :func:`_revoke_service_account_for_all_workspaces_in_background`."""
     try:
-        revoke_service_for_all_workspaces(
+        revoke_service_account_for_all_workspaces(
             backend_resolver=backend_resolver,
             gateway_client=handler.gateway_client,
             services_catalog=handler.services_catalog,
             latchkey=handler.latchkey,
             service_name=service_name,
+            account=account,
         )
     except (PermissionOverviewError, LatchkeyGatewayClientError) as e:
-        logger.warning("Background revoke-all for {} after last-account disconnect failed: {}", service_name, e)
+        logger.warning(
+            "Background revoke-all for {} account {!r} after disconnect failed: {}", service_name, account, e
+        )
 
 
 def _handle_set_default_account() -> Response:
@@ -3073,6 +3180,9 @@ def _handle_set_default_account() -> Response:
     minds_config: MindsConfig | None = get_state().minds_config
     if minds_config and user_id:
         minds_config.set_default_account_id(user_id)
+        # The home screen's account launcher shows the default account, so the
+        # open windows behind this modal need to re-read it.
+        wake_chrome_event_streams()
     return make_response(status_code=303, headers={"Location": "/accounts"})
 
 
@@ -3825,6 +3935,7 @@ def create_desktop_client(
     # only the GET create-form page and the /creating/<id> progress page remain
     # here; status/logs and the form POST moved to the versioned surface.
     app.add_url_rule("/create", view_func=_handle_create_page)
+    app.add_url_rule("/create/inspiration", view_func=_handle_inspiration_create_page)
     app.add_url_rule("/creating/<agent_id>", view_func=_handle_creating_page)
 
     # Agent destruction routes. Destroy, status/log streaming, and dismiss
