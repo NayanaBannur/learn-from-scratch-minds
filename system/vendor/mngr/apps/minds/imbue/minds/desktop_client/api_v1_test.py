@@ -1,6 +1,7 @@
 import json
 import os
 import queue
+import re
 import shlex
 import threading
 import time
@@ -10,6 +11,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -55,6 +57,7 @@ from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.templates import default_workspace_template_ref
 from imbue.minds.desktop_client.templates import status_text_for
 from imbue.minds.desktop_client.testing import capture_error_logs
 from imbue.minds.desktop_client.testing import restic_backup_a_file
@@ -296,6 +299,40 @@ def test_list_accounts_requires_bearer(tmp_path: Path) -> None:
     client = _build_client(tmp_path, StaticBackendResolver(url_by_agent_and_service={}))
 
     response = client.get("/api/v1/accounts")
+
+    assert response.status_code == 401
+
+
+def test_app_version_reports_a_release_tag_a_workspace_can_cap_against(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The route's whole job: hand a workspace the ceiling on how far it may update.
+
+    update-self drops the ceiling for anything that is not a
+    ``minds-v<major>.<minor>.<patch>`` tag, so a shipped app reporting a plain
+    branch name would leave every workspace uncapped. Hence the shape assertion
+    rather than a literal version, and the cleared operator opt-in -- under ``just
+    minds-start``, ``MINDS_WORKSPACE_BRANCH`` legitimately overrides the ref with a
+    branch name.
+    """
+    monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
+    client = _build_client(tmp_path, StaticBackendResolver(url_by_agent_and_service={}))
+
+    response = client.get("/api/v1/app/version", headers=_auth_header())
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["workspace_template_ref"] == default_workspace_template_ref()
+    assert re.fullmatch(r"minds-v\d+\.\d+\.\d+", body["workspace_template_ref"]), (
+        f"the shipped template pin must be a minds-v* release tag or workspaces lose their "
+        f"update ceiling; got {body['workspace_template_ref']!r}"
+    )
+
+
+def test_app_version_requires_bearer(tmp_path: Path) -> None:
+    client = _build_client(tmp_path, StaticBackendResolver(url_by_agent_and_service={}))
+
+    response = client.get("/api/v1/app/version")
 
     assert response.status_code == 401
 
@@ -586,7 +623,7 @@ def test_workspaces_backups_stream_degrades_non_agent_ids_without_failing_the_ba
     row_by_id = {row["agent_id"]: row for row in lines}
     assert set(row_by_id) == {str(agent_id), create_attempt_id}
     assert row_by_id[str(agent_id)]["error"] is None
-    assert row_by_id[create_attempt_id]["error"] == "not a workspace agent id"
+    assert row_by_id[create_attempt_id]["error"] == "not a machine agent id"
 
 
 def test_workspaces_backups_stream_degrades_unresolved_rows_on_row_timeout() -> None:
@@ -912,6 +949,29 @@ def test_create_workspace_full_surface_returns_202_and_threads_fields(
     assert str(creator.last_call["color"]) == "#0b292b"
     assert str(creator.last_call["branch"]) == "main"
     assert creator.last_call["docker_runtime"] == DockerRuntime.RUNSC
+
+
+def test_timezone_returns_valid_iana_name_or_empty(tmp_path: Path) -> None:
+    # The endpoint reports the machine's own timezone, so the value is
+    # host-dependent: assert the contract (a loadable IANA name, or "" when
+    # undeterminable) rather than a specific zone.
+    client = _client_with_workspace(tmp_path, AgentId())
+
+    response = client.get("/api/v1/timezone", headers=_auth_header())
+
+    assert response.status_code == 200
+    tz_name = json.loads(response.data)["timezone"]
+    assert isinstance(tz_name, str)
+    if tz_name:
+        ZoneInfo(tz_name)
+
+
+def test_timezone_requires_auth(tmp_path: Path) -> None:
+    client = _client_with_workspace(tmp_path, AgentId())
+
+    response = client.get("/api/v1/timezone")
+
+    assert response.status_code == 401
 
 
 def test_create_workspace_ignores_stale_ai_provider_field(
@@ -1590,7 +1650,7 @@ def test_patch_provider_disable_with_active_workspaces_conflicts(tmp_path: Path)
     response = client.patch("/api/v1/desktop/providers/local", headers=_auth_header(), json={"enabled": False})
 
     assert response.status_code == 409
-    assert "active workspace" in json.loads(response.data)["error"].lower()
+    assert "active machine" in json.loads(response.data)["error"].lower()
 
 
 @pytest.mark.parametrize(
@@ -1899,7 +1959,7 @@ def test_sharing_readiness_not_ready_without_http_client(tmp_path: Path) -> None
 def _resolver_with_services_agent(agent_id: AgentId, services_id: AgentId) -> BackendResolverInterface:
     """Build a resolver where ``agent_id`` and a ``system-services`` peer share a host.
 
-    The restart worker resolves the system-services agent on the workspace's host;
+    The restart worker resolves the system-services agent on the machine's host;
     a single-agent resolver returns None there (so the restart fails fast). This
     registers both agents on the same host so ``get_system_services_agent_id``
     resolves and the worker can run its stop/start steps.
@@ -2097,13 +2157,13 @@ def _wait_for_restart_worker_and_get_status(client: FlaskClient, agent_id: Agent
 def test_restart_dispatches_for_never_probed_workspace(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
-    """A recovery-page dispatch for a never-probed workspace must actually restart.
+    """A recovery-page dispatch for a never-probed machine must actually restart.
 
-    A workspace whose host has been offline since before this process started is
+    A machine whose host has been offline since before this process started is
     never enrolled as a probe suspect, so the tracker reports default-HEALTHY for
     it. A veto keyed on that reading would drop the recovery page's
     unconditional entry dispatch (host scope + ``start_only``), stranding the
-    workspace on the loader forever. The dispatch must proceed to a real restart
+    machine on the loader forever. The dispatch must proceed to a real restart
     operation -- self-recovery races are absorbed by ``mngr start`` only
     targeting STOPPED agents, not by an endpoint-side veto.
     """
@@ -2817,7 +2877,7 @@ class _NameConflictAgentCreator(_RecordingAgentCreator):
         account_id: str = "",
     ) -> CreateAttemptId:
         raise WorkspaceNameInUseError(
-            "A workspace named 'contended' is already being created. "
+            "A machine named 'contended' is already being created. "
             "Wait for that create attempt to finish or pick a different name."
         )
 
