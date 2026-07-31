@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 336" font-family="-apple-system, system-ui, sans-serif">
+  <defs>
+    <marker id="q" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#2563eb"/></marker>
+    <marker id="r" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#9aa4b2"/></marker>
+  </defs>
+
+  <text x="360" y="20" text-anchor="middle" font-size="14" font-weight="700" fill="#1f2328">Resolving www.example.com</text>
+
+  <!-- your device -->
+  <rect x="20" y="150" width="120" height="46" rx="8" fill="#f3f4f6" stroke="#9aa4b2"/>
+  <text x="80" y="171" text-anchor="middle" font-size="13" fill="#1f2328">your device</text>
+  <text x="80" y="187" text-anchor="middle" font-size="11" fill="#6b7280">stub resolver</text>
+
+  <!-- recursive resolver -->
+  <rect x="240" y="150" width="130" height="46" rx="8" fill="#e6effe" stroke="#2563eb"/>
+  <text x="305" y="171" text-anchor="middle" font-size="13" font-weight="600" fill="#1f2328">recursive</text>
+  <text x="305" y="187" text-anchor="middle" font-size="13" font-weight="600" fill="#1f2328">resolver</text>
+
+  <!-- authoritative servers (right column) -->
+  <rect x="560" y="40" width="140" height="42" rx="8" fill="#eaf4ee" stroke="#2f6f4f"/>
+  <text x="630" y="66" text-anchor="middle" font-size="13" fill="#1f2328">root server</text>
+  <rect x="560" y="152" width="140" height="42" rx="8" fill="#eaf4ee" stroke="#2f6f4f"/>
+  <text x="630" y="178" text-anchor="middle" font-size="13" fill="#1f2328">.com servers</text>
+  <rect x="560" y="264" width="140" height="42" rx="8" fill="#eaf4ee" stroke="#2f6f4f"/>
+  <text x="630" y="290" text-anchor="middle" font-size="13" fill="#1f2328">example.com servers</text>
+
+  <!-- device <-> resolver -->
+  <line x1="140" y1="167" x2="236" y2="167" stroke="#2563eb" stroke-width="1.6" marker-end="url(#q)"/>
+  <text x="188" y="160" text-anchor="middle" font-size="10" fill="#2563eb">name?</text>
+  <line x1="236" y1="182" x2="140" y2="182" stroke="#9aa4b2" stroke-width="1.6" marker-end="url(#r)"/>
+  <text x="188" y="196" text-anchor="middle" font-size="10" fill="#6b7280">address</text>
+
+  <!-- resolver <-> root -->
+  <line x1="372" y1="158" x2="556" y2="70" stroke="#2563eb" stroke-width="1.6" marker-end="url(#q)"/>
+  <text x="452" y="104" text-anchor="middle" font-size="10" fill="#2563eb">1 · where is .com?</text>
+  <line x1="556" y1="82" x2="372" y2="166" stroke="#9aa4b2" stroke-width="1.6" marker-end="url(#r)"/>
+  <text x="470" y="140" text-anchor="middle" font-size="10" fill="#6b7280">→ ask .com</text>
+
+  <!-- resolver <-> tld -->
+  <line x1="372" y1="170" x2="556" y2="170" stroke="#2563eb" stroke-width="1.6" marker-end="url(#q)"/>
+  <text x="464" y="164" text-anchor="middle" font-size="10" fill="#2563eb">2 · where is example.com?</text>
+  <line x1="556" y1="184" x2="372" y2="184" stroke="#9aa4b2" stroke-width="1.6" marker-end="url(#r)"/>
+  <text x="464" y="198" text-anchor="middle" font-size="10" fill="#6b7280">→ ask example.com</text>
+
+  <!-- resolver <-> auth -->
+  <line x1="372" y1="188" x2="556" y2="276" stroke="#2563eb" stroke-width="1.6" marker-end="url(#q)"/>
+  <text x="452" y="248" text-anchor="middle" font-size="10" fill="#2563eb">3 · address of www?</text>
+  <line x1="556" y1="288" x2="372" y2="196" stroke="#9aa4b2" stroke-width="1.6" marker-end="url(#r)"/>
+  <text x="474" y="284" text-anchor="middle" font-size="10" fill="#6b7280">→ 93.184.216.34</text>
+
+  <text x="360" y="328" text-anchor="middle" font-size="12" fill="#6b7280">One recursive query in; three iterative queries out, each referral one step closer.</text>
+</svg>

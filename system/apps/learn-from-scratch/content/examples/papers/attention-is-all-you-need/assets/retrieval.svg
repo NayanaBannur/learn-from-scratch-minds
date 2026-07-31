@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 300" font-family="ui-sans-serif, system-ui, sans-serif">
+  <defs>
+    <marker id="rv" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6.5,3 L0,6 Z" fill="#5fae82" />
+    </marker>
+  </defs>
+
+  <text x="16" y="24" font-size="13" font-weight="700" fill="#3a3f45">One token's query is matched against every key, then blends the values</text>
+
+  <!-- query -->
+  <rect x="20" y="120" width="86" height="44" rx="6" fill="#e8eefc" stroke="#7d97d4" stroke-width="1.4"/>
+  <text x="63" y="140" font-size="11.5" font-weight="700" fill="#3a55a0" text-anchor="middle">query</text>
+  <text x="63" y="156" font-size="9.5" fill="#5f76b8" text-anchor="middle">what I want</text>
+
+  <!-- key/value rows with weights -->
+  <g font-size="10.5" text-anchor="middle">
+    <!-- row 1: strong match -->
+    <rect x="210" y="54" width="70" height="26" rx="5" fill="#eef2f7" stroke="#9aa0a6"/><text x="245" y="71" fill="#3a3f45">key₁</text>
+    <rect x="300" y="54" width="70" height="26" rx="5" fill="#fff3d6" stroke="#d6a93a"/><text x="335" y="71" fill="#8a6d1f">value₁</text>
+    <text x="150" y="71" font-size="10.5" font-weight="700" fill="#2f7d52" text-anchor="middle">0.6</text>
+
+    <rect x="210" y="98" width="70" height="26" rx="5" fill="#eef2f7" stroke="#9aa0a6"/><text x="245" y="115" fill="#3a3f45">key₂</text>
+    <rect x="300" y="98" width="70" height="26" rx="5" fill="#fff3d6" stroke="#d6a93a"/><text x="335" y="115" fill="#8a6d1f">value₂</text>
+    <text x="150" y="115" font-size="10.5" font-weight="700" fill="#6b7280" text-anchor="middle">0.2</text>
+
+    <rect x="210" y="142" width="70" height="26" rx="5" fill="#eef2f7" stroke="#9aa0a6"/><text x="245" y="159" fill="#3a3f45">key₃</text>
+    <rect x="300" y="142" width="70" height="26" rx="5" fill="#fff3d6" stroke="#d6a93a"/><text x="335" y="159" fill="#8a6d1f">value₃</text>
+    <text x="150" y="159" font-size="10.5" font-weight="700" fill="#6b7280" text-anchor="middle">0.1</text>
+
+    <rect x="210" y="186" width="70" height="26" rx="5" fill="#eef2f7" stroke="#9aa0a6"/><text x="245" y="203" fill="#3a3f45">key₄</text>
+    <rect x="300" y="186" width="70" height="26" rx="5" fill="#fff3d6" stroke="#d6a93a"/><text x="335" y="203" fill="#8a6d1f">value₄</text>
+    <text x="150" y="203" font-size="10.5" font-weight="700" fill="#6b7280" text-anchor="middle">0.1</text>
+  </g>
+
+  <!-- query -> keys (compare) -->
+  <g stroke="#7d97d4" fill="none">
+    <path d="M106,134 C150,110 170,70 208,67" stroke-width="2.4"/>
+    <path d="M106,140 C150,125 175,112 208,111" stroke-width="1.3"/>
+    <path d="M106,144 C150,150 175,154 208,155" stroke-width="1"/>
+    <path d="M106,150 C150,175 175,197 208,199" stroke-width="1"/>
+  </g>
+  <text x="150" y="44" font-size="9.5" fill="#3a55a0" text-anchor="middle">match strength = weight</text>
+
+  <!-- values -> output (weighted blend) -->
+  <g stroke="#5fae82" fill="none" marker-end="url(#rv)">
+    <path d="M370,67 C430,80 470,120 500,138" stroke-width="2.8"/>
+    <path d="M370,111 C430,120 470,132 500,144" stroke-width="1.4"/>
+    <path d="M370,155 C430,150 470,150 500,150" stroke-width="1"/>
+    <path d="M370,199 C430,185 470,170 500,158" stroke-width="1"/>
+  </g>
+
+  <!-- output -->
+  <rect x="504" y="126" width="82" height="44" rx="6" fill="#e6f5ec" stroke="#5fae82" stroke-width="1.4"/>
+  <text x="545" y="146" font-size="11" font-weight="700" fill="#2f7d52" text-anchor="middle">output</text>
+  <text x="545" y="162" font-size="9" fill="#3f8a63" text-anchor="middle">weighted blend</text>
+
+  <text x="16" y="288" font-size="11" fill="#6b7280">Thicker line = higher weight. Nothing is picked outright — every value contributes a share.</text>
+</svg>

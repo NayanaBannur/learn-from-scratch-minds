@@ -1,0 +1,24 @@
+node_modules
+dist
+.DS_Store
+*.local
+**/settings.local.json
+.idea
+scratch
+
+# Generated learning content is user data, not code -- keep it out of git.
+# The two bundled sample topics under content/examples/ are shipped with the app
+# (so a fresh checkout isn't empty) and stay tracked; everything else generated
+# under content/ is ignored. Ignored content still survives container loss via
+# the host-level backup (restic snapshot of the whole host dir).
+content/*
+!content/examples/
+
+# The reader's personal knowledge profile is private -- keep it local.
+user-knowledge.md
+
+# The repo-root .gitignore has `**/lib/`, which would otherwise exclude this
+# app's own source directory src/lib/ (content loading, markdown, tags, and the
+# persistence hooks). Re-include it so the app's source is actually tracked.
+!src/lib/
+!src/lib/**

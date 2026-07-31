@@ -1,0 +1,80 @@
+{
+  "title": "Attention Is All You Need",
+  "subtitle": "The Transformer: sequence modelling built entirely from attention — Vaswani et al., Google, NeurIPS 2017",
+  "dateCreated": "2026-06-30",
+  "tags": [
+    "unread"
+  ],
+  "levels": [
+    { "caption": "The 2017 problem: recurrence is sequential and slow" },
+    { "caption": "The proposal: attention, and nothing else" },
+    { "caption": "Attention as soft retrieval: queries, keys, values" },
+    { "caption": "Scaled dot-product attention: the core formula" },
+    { "caption": "Why divide by the square root of the key size" },
+    { "caption": "Self-attention: every token attends to every token" },
+    { "caption": "Why a single attention head is too narrow" },
+    { "caption": "Multi-head attention: many views in parallel" },
+    { "caption": "The encoder-decoder skeleton: two stacks of six" },
+    { "caption": "Inside an encoder layer: residual + normalization" },
+    { "caption": "The position-wise feed-forward network" },
+    { "caption": "The decoder and the causal mask" },
+    { "caption": "The three places attention is used" },
+    { "caption": "Attention is order-blind" },
+    { "caption": "Sinusoidal positional encoding" },
+    { "caption": "Why self-attention wins: parallelism and path length" },
+    { "caption": "Training setup" },
+    { "caption": "Results and legacy" }
+  ],
+  "sections": [
+    { "id": "problem", "title": "The problem with recurrence", "level": 1, "file": "sections/problem.md" },
+    { "id": "proposal", "title": "The proposal: attention alone", "level": 2, "file": "sections/proposal.md" },
+    { "id": "retrieval", "title": "Attention as soft retrieval", "level": 3, "file": "sections/retrieval.md" },
+    { "id": "scaled-dot-product", "title": "Scaled dot-product attention", "level": 4, "file": "sections/scaled-dot-product.md" },
+    { "id": "why-scale", "title": "Why the square-root scaling", "level": 5, "file": "sections/why-scale.md", "additionalReading": true },
+    { "id": "self-attention", "title": "Self-attention", "level": 6, "file": "sections/self-attention.md" },
+    { "id": "why-multi-head", "title": "Why one head is too narrow", "level": 7, "file": "sections/why-multi-head.md" },
+    { "id": "multi-head", "title": "Multi-head attention", "level": 8, "file": "sections/multi-head.md" },
+    { "id": "skeleton", "title": "The encoder-decoder skeleton", "level": 9, "file": "sections/skeleton.md" },
+    { "id": "encoder-layer", "title": "Inside an encoder layer", "level": 10, "file": "sections/encoder-layer.md" },
+    { "id": "ffn", "title": "The feed-forward network", "level": 11, "file": "sections/ffn.md" },
+    { "id": "decoder-mask", "title": "The decoder and the causal mask", "level": 12, "file": "sections/decoder-mask.md" },
+    { "id": "three-uses", "title": "The three uses of attention", "level": 13, "file": "sections/three-uses.md" },
+    { "id": "order-blind", "title": "Attention is order-blind", "level": 14, "file": "sections/order-blind.md" },
+    { "id": "positional-encoding", "title": "Sinusoidal positional encoding", "level": 15, "file": "sections/positional-encoding.md" },
+    { "id": "why-self-attention", "title": "Why self-attention wins", "level": 16, "file": "sections/why-self-attention.md" },
+    { "id": "training", "title": "Training setup", "level": 17, "file": "sections/training.md", "additionalReading": true },
+    { "id": "results", "title": "Results and legacy", "level": 18, "file": "sections/results.md" }
+  ],
+  "sources": [
+    {
+      "id": "transformer",
+      "title": "Attention Is All You Need",
+      "publisher": "Vaswani, Shazeer, Parmar, Uszkoreit, Jones, Gomez, Kaiser & Polosukhin, Google — NeurIPS 2017, arXiv:1706.03762 (12 Jun 2017)",
+      "url": "https://arxiv.org/abs/1706.03762"
+    },
+    {
+      "id": "bahdanau",
+      "title": "Neural Machine Translation by Jointly Learning to Align and Translate",
+      "publisher": "Bahdanau, Cho & Bengio — ICLR 2015, arXiv:1409.0473 (2014)",
+      "url": "https://arxiv.org/abs/1409.0473"
+    },
+    {
+      "id": "seq2seq",
+      "title": "Sequence to Sequence Learning with Neural Networks",
+      "publisher": "Sutskever, Vinyals & Le, Google — NeurIPS 2014, arXiv:1409.3215",
+      "url": "https://arxiv.org/abs/1409.3215"
+    },
+    {
+      "id": "layernorm",
+      "title": "Layer Normalization",
+      "publisher": "Ba, Kiros & Hinton — arXiv:1607.06450 (2016)",
+      "url": "https://arxiv.org/abs/1607.06450"
+    },
+    {
+      "id": "resnet",
+      "title": "Deep Residual Learning for Image Recognition",
+      "publisher": "He, Zhang, Ren & Sun, Microsoft Research — CVPR 2016, arXiv:1512.03385 (2015)",
+      "url": "https://arxiv.org/abs/1512.03385"
+    }
+  ]
+}

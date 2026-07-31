@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 260" font-family="ui-sans-serif, system-ui, sans-serif">
+  <defs>
+    <marker id="sa" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6.5,3 L0,6 Z" fill="#7d97d4" />
+    </marker>
+  </defs>
+
+  <text x="16" y="24" font-size="13" font-weight="700" fill="#3a3f45">Every token attends to all tokens — shown here for one</text>
+
+  <!-- bottom row: source tokens -->
+  <g font-size="11" text-anchor="middle">
+    <rect x="40"  y="180" width="86" height="34" rx="6" fill="#eef2f7" stroke="#9aa0a6"/><text x="83"  y="202" fill="#3a3f45">The</text>
+    <rect x="146" y="180" width="86" height="34" rx="6" fill="#eef2f7" stroke="#9aa0a6"/><text x="189" y="202" fill="#3a3f45">animal</text>
+    <rect x="252" y="180" width="86" height="34" rx="6" fill="#e8eefc" stroke="#7d97d4" stroke-width="1.6"/><text x="295" y="202" font-weight="700" fill="#3a55a0">it</text>
+    <rect x="358" y="180" width="86" height="34" rx="6" fill="#eef2f7" stroke="#9aa0a6"/><text x="401" y="202" fill="#3a3f45">was</text>
+    <rect x="464" y="180" width="86" height="34" rx="6" fill="#eef2f7" stroke="#9aa0a6"/><text x="507" y="202" fill="#3a3f45">tired</text>
+  </g>
+  <text x="295" y="232" font-size="9.5" fill="#3a55a0" text-anchor="middle">this token's query</text>
+
+  <!-- new representation node for "it" -->
+  <rect x="252" y="70" width="86" height="34" rx="6" fill="#e6f5ec" stroke="#5fae82" stroke-width="1.6"/>
+  <text x="295" y="92" font-size="11" font-weight="700" fill="#2f7d52" text-anchor="middle">it, in context</text>
+
+  <!-- arrows from every token up to the "it" representation -->
+  <g stroke="#7d97d4" fill="none" marker-end="url(#sa)">
+    <path d="M83,180 C120,140 200,110 258,96" stroke-width="1.2"/>
+    <path d="M189,180 C210,150 240,120 272,104" stroke-width="2.6"/>
+    <path d="M295,180 C295,150 295,130 295,108" stroke-width="1.6"/>
+    <path d="M401,180 C380,150 350,120 318,104" stroke-width="1.2"/>
+    <path d="M507,180 C470,140 360,110 332,98" stroke-width="1.4"/>
+  </g>
+
+  <text x="16" y="252" font-size="11" fill="#6b7280">Queries, keys and values all come from the same sentence. "animal" gets the most weight (thicker line).</text>
+</svg>

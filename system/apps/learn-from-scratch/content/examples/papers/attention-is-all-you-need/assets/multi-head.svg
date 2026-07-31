@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 300" font-family="ui-sans-serif, system-ui, sans-serif">
+  <defs>
+    <marker id="mh" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6.5,3 L0,6 Z" fill="#6b7280" />
+    </marker>
+  </defs>
+
+  <text x="16" y="24" font-size="13" font-weight="700" fill="#3a3f45">One wide vector is split across 8 heads, then recombined</text>
+
+  <!-- input full width -->
+  <rect x="150" y="44" width="300" height="26" rx="4" fill="#e8eefc" stroke="#7d97d4" stroke-width="1.3"/>
+  <text x="300" y="61" font-size="10.5" font-weight="700" fill="#3a55a0" text-anchor="middle">token vector — width 512</text>
+
+  <!-- split lines -->
+  <g stroke="#6b7280" stroke-width="1" fill="none">
+    <path d="M300,70 L90,110"/>
+    <path d="M300,70 L510,110"/>
+  </g>
+
+  <!-- 8 heads (draw representative ones, ellipsis) -->
+  <g font-size="9" text-anchor="middle">
+    <rect x="60"  y="112" width="46" height="24" rx="4" fill="#eef2f7" stroke="#9aa0a6"/><text x="83"  y="128" fill="#3a3f45">head 1</text>
+    <rect x="118" y="112" width="46" height="24" rx="4" fill="#eef2f7" stroke="#9aa0a6"/><text x="141" y="128" fill="#3a3f45">head 2</text>
+    <rect x="176" y="112" width="46" height="24" rx="4" fill="#eef2f7" stroke="#9aa0a6"/><text x="199" y="128" fill="#3a3f45">head 3</text>
+    <text x="255" y="128" font-size="13" fill="#9aa0a6">· · ·</text>
+    <rect x="490" y="112" width="46" height="24" rx="4" fill="#eef2f7" stroke="#9aa0a6"/><text x="513" y="128" fill="#3a3f45">head 8</text>
+  </g>
+  <text x="300" y="104" font-size="9.5" fill="#6b7280" text-anchor="middle">each head works in width 64 = 512 / 8</text>
+
+  <!-- attention per head -->
+  <g font-size="8.5" text-anchor="middle" fill="#8a6d1f">
+    <rect x="60"  y="150" width="46" height="30" rx="4" fill="#fff3d6" stroke="#d6a93a"/><text x="83"  y="164">attend</text><text x="83"  y="175">own Q,K,V</text>
+    <rect x="118" y="150" width="46" height="30" rx="4" fill="#fff3d6" stroke="#d6a93a"/><text x="141" y="164">attend</text><text x="141" y="175">own Q,K,V</text>
+    <rect x="176" y="150" width="46" height="30" rx="4" fill="#fff3d6" stroke="#d6a93a"/><text x="199" y="164">attend</text><text x="199" y="175">own Q,K,V</text>
+    <rect x="490" y="150" width="46" height="30" rx="4" fill="#fff3d6" stroke="#d6a93a"/><text x="513" y="164">attend</text><text x="513" y="175">own Q,K,V</text>
+  </g>
+  <g stroke="#6b7280" stroke-width="1" fill="none" marker-end="url(#mh)">
+    <path d="M83,136 L83,148"/><path d="M141,136 L141,148"/><path d="M199,136 L199,148"/><path d="M513,136 L513,148"/>
+  </g>
+
+  <!-- concat -->
+  <g stroke="#6b7280" stroke-width="1" fill="none">
+    <path d="M83,180 L300,214"/><path d="M141,180 L300,214"/><path d="M199,180 L300,214"/><path d="M513,180 L300,214"/>
+  </g>
+  <rect x="150" y="216" width="300" height="26" rx="4" fill="#eef2f7" stroke="#9aa0a6" stroke-width="1.3"/>
+  <text x="300" y="233" font-size="10.5" fill="#3a3f45" text-anchor="middle">concatenate heads — back to width 512</text>
+
+  <!-- W^O -->
+  <line x1="300" y1="242" x2="300" y2="256" stroke="#6b7280" stroke-width="1" marker-end="url(#mh)"/>
+  <rect x="200" y="258" width="200" height="26" rx="4" fill="#e6f5ec" stroke="#5fae82" stroke-width="1.4"/>
+  <text x="300" y="275" font-size="10.5" font-weight="700" fill="#2f7d52" text-anchor="middle">mix with the output projection<tspan font-size="9" baseline-shift="super"> </tspan></text>
+</svg>
